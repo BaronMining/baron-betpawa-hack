@@ -80,7 +80,6 @@ def fetch_and_update_history():
     try:
         rounds = scraper.fetch_round_history()
         if rounds:
-            # Add to buffer in chronological order if scraper returns newest last
             for r in reversed(rounds):
                 m = r.get("multiplier", 0)
                 if m > 0 and m not in round_history:
@@ -106,7 +105,6 @@ def start_websocket():
                 else:
                     time.sleep(30)
             except Exception as e:
-                # Suppress noisy block logging for handshake rejections
                 err_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
                 logger.warning(f"WS Gateway unavailable ({err_msg[:60]}). Retrying in 30s...")
                 time.sleep(30)
@@ -232,12 +230,12 @@ async def execute_automated_signal_broadcast(bot):
         except Exception as e:
             logger.error(f"Failed to transmit engine message payload: {e}")
 
-async def start_async_background_tasks(application):
-    """Runs automated loops inside the native app frame to replace job_queue"""
+async def post_init_background_tasks(application: Application):
+    """Safely runs automated loops inside the active framing loop once started"""
     bot = application.bot
     
     async def loop_signals():
-        await asyncio.sleep(5)  # Init delay
+        await asyncio.sleep(5)
         while True:
             try:
                 await execute_automated_signal_broadcast(bot)
@@ -246,7 +244,7 @@ async def start_async_background_tasks(application):
             await asyncio.sleep(AUTO_SEND_INTERVAL)
 
     async def loop_refresh_and_train():
-        await asyncio.sleep(10)  # Init delay
+        await asyncio.sleep(10)
         while True:
             try:
                 fetch_and_update_history()
@@ -258,10 +256,10 @@ async def start_async_background_tasks(application):
                 logger.error(f"Error in data refresh loop: {e}")
             await asyncio.sleep(60)
 
-    # Register as concurrent background processes
+    # Safely creates background loop tasks without triggering thread exceptions
     asyncio.create_task(loop_signals())
     asyncio.create_task(loop_refresh_and_train())
-    logger.info("[*] Native asynchronous loop background frameworks initialized")
+    logger.info("[*] Asynchronous context loops hooked into system runtime successfully")
 
 # ===================== COMMANDS =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -379,8 +377,8 @@ def main():
     # Establish WebSockets listener thread
     start_websocket()
 
-    # Build Application
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Build Application and attach our post-init async task loader callback safely
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init_background_tasks).build()
 
     # Routing Configuration Commands
     application.add_handler(CommandHandler("start", start))
@@ -390,11 +388,7 @@ def main():
     application.add_handler(CommandHandler("train", force_train))
     application.add_handler(CommandHandler("refresh", force_refresh))
 
-    # Initialize task runners explicitly after engine setup completes
-    loop = asyncio.get_event_loop()
-    loop.create_task(start_async_background_tasks(application))
-
-    # Block run loop execution
+    # Block run loop execution securely
     logger.info("🚀 BARON MILLION-AI Telegram Interface Engine Deploying Successfully!")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
