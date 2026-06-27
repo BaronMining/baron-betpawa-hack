@@ -5,9 +5,3 @@ requests==2.31.0
 beautifulsoup4==4.12.3
 lxml==5.1.1
 fake-useragent==1.5.1
-numpy==1.26.4
-pandas==2.2.2
-scikit-learn==1.5.1
-joblib==1.4.2
-setuptools==75.1.0
-wheel==0.44.0
