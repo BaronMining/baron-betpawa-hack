@@ -184,7 +184,7 @@ def format_signal(signal: Dict) -> str:
             f"│ 20-Round Std Dev   │ {std_val:<9} │\n"
             f"│ High Streak (10r)  │ {high_str:<9} │\n"
             f"│ Low Streak (10r)   │ {low_str:<9} │\n"
-            └────────────────────┴───────────┘\n"
+            f"└────────────────────┴───────────┘\n"
             f"```\n"
         )
 
