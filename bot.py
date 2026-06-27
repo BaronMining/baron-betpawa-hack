@@ -167,16 +167,22 @@ def format_signal(signal: Dict) -> str:
     )
 
     if stats:
+        # Fixed the nested formatting expressions here to avoid escaping quotes
+        high_str = f"{stats.get('high_streak', 0)}/10"
+        low_str = f"{stats.get('low_streak', 0)}/10"
+        mean_val = f"{stats.get('mean_20', 'N/A')}"
+        std_val = f"{stats.get('std_20', 'N/A')}"
+
         msg += (
             f"\n📊 *20-Round Metrics Table:*\n"
             f"```\n"
             f"┌────────────────────┬───────────┐\n"
             f"│ Metric             │ Value     │\n"
             f"├────────────────────┼───────────┤\n"
-            f"│ 20-Round Mean      │ {stats.get('mean_20', 'N/A'):<9} │\n"
-            f"│ 20-Round Std Dev   │ {stats.get('std_20', 'N/A'):<9} │\n"
-            f"│ High Streak (10r)  │ {f'{stats.get(\"high_streak\", 0)}/10':<9} │\n"
-            f"│ Low Streak (10r)   │ {f'{stats.get(\"low_streak\", 0)}/10':<9} │\n"
+            f"│ 20-Round Mean      │ {mean_val:<9} │\n"
+            f"│ 20-Round Std Dev   │ {std_val:<9} │\n"
+            f"│ High Streak (10r)  │ {high_str:<9} │\n"
+            f"│ Low Streak (10r)   │ {low_str:<9} │\n"
             f"└────────────────────┴───────────┘\n"
             f"```\n"
         )
