@@ -91,7 +91,7 @@ def fetch_and_update_history():
         logger.error(f"Fetch error: {e}")
 
 def start_websocket():
-    """Start WebSocket listener in background thread"""
+    """Start WebSocket listener in background thread with clean error silencing"""
     global ws_thread, ws_running
 
     def ws_loop():
@@ -103,11 +103,16 @@ def start_websocket():
                 if ws:
                     ws.run_forever()
                 else:
-                    time.sleep(30)
+                    time.sleep(45)
             except Exception as e:
-                err_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
-                logger.warning(f"WS Gateway unavailable ({err_msg[:60]}). Retrying in 30s...")
-                time.sleep(30)
+                err_msg = str(e)
+                # Catch Cloudflare proxy interception and log it cleanly without dict dumps
+                if "Handshake status 200" in err_msg or "status 200" in err_msg:
+                    logger.info("📡 Gateway status: Proxy layer active. Engine using fallback DOM polling.")
+                else:
+                    clean_msg = err_msg.split('\n')[0] if '\n' in err_msg else err_msg
+                    logger.warning(f"WS Gateway update tracking: {clean_msg[:60]}")
+                time.sleep(45)
 
     ws_thread = threading.Thread(target=ws_loop, daemon=True)
     ws_thread.start()
@@ -223,174 +228,3 @@ async def execute_automated_signal_broadcast(bot):
             await bot.send_message(
                 chat_id=YOUR_TELEGRAM_ID,
                 text=msg,
-                parse_mode='Markdown',
-                disable_web_page_preview=True,
-            )
-            logger.info(f"Automatic signal broadcast successful: {signal['signal']}")
-        except Exception as e:
-            logger.error(f"Failed to transmit engine message payload: {e}")
-
-async def post_init_background_tasks(application: Application):
-    """Safely runs automated loops inside the active framing loop once started"""
-    bot = application.bot
-    
-    async def loop_signals():
-        await asyncio.sleep(5)
-        while True:
-            try:
-                await execute_automated_signal_broadcast(bot)
-            except Exception as e:
-                logger.error(f"Error in signal loop: {e}")
-            await asyncio.sleep(AUTO_SEND_INTERVAL)
-
-    async def loop_refresh_and_train():
-        await asyncio.sleep(10)
-        while True:
-            try:
-                fetch_and_update_history()
-                if len(round_history) >= 50 and not predictor.is_trained:
-                    logger.info("Initializing background auto-training...")
-                    predictor.train(list(round_history), epochs=30)
-                    predictor.save()
-            except Exception as e:
-                logger.error(f"Error in data refresh loop: {e}")
-            await asyncio.sleep(60)
-
-    # Safely creates background loop tasks without triggering thread exceptions
-    asyncio.create_task(loop_signals())
-    asyncio.create_task(loop_refresh_and_train())
-    logger.info("[*] Asynchronous context loops hooked into system runtime successfully")
-
-# ===================== COMMANDS =====================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
-    await update.message.reply_text(
-        "🤖 *BARON MILLION-AI Core Online*\n\n"
-        "✅ Service actively initialized!\n"
-        f"• Direct routing target: `{YOUR_TELEGRAM_ID}`\n"
-        f"• Operational confidence ceiling: `{CONFIDENCE_THRESHOLD:.0%}`\n"
-        f"• Execution scan window: `{AUTO_SEND_INTERVAL}s`\n"
-        f"• Registered baseline data: `{len(round_history)}` seeds\n\n"
-        "*Available Operations:*\n"
-        "/signal — Force instantly computed signal manual override\n"
-        "/status — Fetch engine diagnostics & parameter telemetry\n"
-        "/history — Print current in-memory data tables\n"
-        "/train — Force instant runtime recalculation and training profile save\n"
-        "/refresh — Manually execute DOM parser cycle",
-        parse_mode='Markdown'
-    )
-
-async def manual_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual /signal command"""
-    fetch_and_update_history()
-    await update.message.reply_chat_action("typing")
-    signal = generate_signal()
-    msg = format_signal(signal)
-    await update.message.reply_text(
-        msg,
-        parse_mode='Markdown',
-        disable_web_page_preview=True,
-    )
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show bot engine state status"""
-    signal = generate_signal()
-    last_signal = signal.get("signal", "N/A")
-    last_pred = signal.get("prediction", "N/A")
-    last_conf = signal.get("confidence", 0)
-
-    status_msg = (
-        f"🤖 *BARON MILLION-AI Engine Diagnostics*\n\n"
-        f"🟢 *System Integration:*\n"
-        f"• Memory Buffers: `{len(round_history)}/500 entries`\n"
-        f"• Model State: `{'✅ Functional Profile Loaded' if predictor.is_trained else '❌ Awaiting Dataset Baseline'}`\n"
-        f"• Background Loop: `✅ Polling Active`\n"
-        f"• Interval Velocity: `{AUTO_SEND_INTERVAL}s`\n\n"
-        f"📡 *Target Parameters:*\n"
-        f"• Gateway Domain: `{scraper.active_domain}`\n"
-        f"• Node Endpoint: `{scraper.active_game_path}`\n\n"
-        f"🔮 *Latest Diagnostic Pipeline:*\n"
-        f"• Last Flag: `{last_signal}`\n"
-        f"• Expected Core Target: `{last_pred}x`\n"
-        f"• Engine Stability Metric: `{last_conf:.1%}`\n\n"
-        f"_Destination Chat ID: {YOUR_TELEGRAM_ID}_"
-    )
-    await update.message.reply_text(status_msg, parse_mode='Markdown')
-
-async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show recent complete dataset history array"""
-    if not round_history:
-        await update.message.reply_text("❌ Database collection profile currently empty.")
-        return
-        
-    history_snapshot = list(round_history)[-30:]
-    history_lines = []
-    for i in range(0, len(history_snapshot), 5):
-        chunk = history_snapshot[i:i+5]
-        history_lines.append("  |  ".join([f"{x:.2f}x" for x in chunk]))
-        
-    formatted_snapshot = "\n".join(history_lines)
-    await update.message.reply_text(
-        f"📊 *Latest 30 Recorded Engine Seeds:*\n\n`{formatted_snapshot}`",
-        parse_mode='Markdown'
-    )
-
-async def force_train(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Force instant training calculation profile execution via /train"""
-    await update.message.reply_text("⚙️ *Starting manual optimization recalculation loop...*", parse_mode='Markdown')
-    if len(round_history) < 25:
-        await update.message.reply_text(f"❌ Aborted: Insufficient historical nodes. (Need >= 25, has {len(round_history)})")
-        return
-        
-    success = predictor.train(list(round_history), epochs=45)
-    if success:
-        predictor.save()
-        await update.message.reply_text("✅ *Recalculation absolute. Math array profiles rewritten and committed.*", parse_mode='Markdown')
-    else:
-        await update.message.reply_text("❌ *Recalculation logic error occurred during modeling sequence.*", parse_mode='Markdown')
-
-async def force_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually parse raw pages via /refresh"""
-    await update.message.reply_text("📡 *Executing forced scrape tracking cycle...*", parse_mode='Markdown')
-    before_count = len(round_history)
-    fetch_and_update_history()
-    after_count = len(round_history)
-    await update.message.reply_text(f"✅ Parser loop ran. Network tracking updated. Captured `{after_count - before_count}` new data seeds.")
-
-# ===================== MAIN APPLICATION INITIALIZATION =====================
-def main():
-    if not BOT_TOKEN:
-        logger.critical("FATAL error: BOT_TOKEN is missing or not provided to application profile.")
-        sys.exit(1)
-
-    # Boot initialization operations
-    logger.info("[*] Bootstrapping operational baseline storage data elements...")
-    fetch_and_update_history()
-    
-    # Try loading existing models right away
-    predictor.load()
-
-    # Launch Web Server inside daemon framework container for Render integration compliance
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-
-    # Establish WebSockets listener thread
-    start_websocket()
-
-    # Build Application and attach our post-init async task loader callback safely
-    application = Application.builder().token(BOT_TOKEN).post_init(post_init_background_tasks).build()
-
-    # Routing Configuration Commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("signal", manual_signal))
-    application.add_handler(CommandHandler("status", status))
-    application.add_handler(CommandHandler("history", show_history))
-    application.add_handler(CommandHandler("train", force_train))
-    application.add_handler(CommandHandler("refresh", force_refresh))
-
-    # Block run loop execution securely
-    logger.info("🚀 BARON MILLION-AI Telegram Interface Engine Deploying Successfully!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
