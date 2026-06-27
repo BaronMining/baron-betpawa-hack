@@ -1,0 +1,11 @@
+python-telegram-bot==20.7
+cloudscraper==1.2.71
+websocket-client==1.8.0
+requests==2.31.0
+beautifulsoup4==4.12.3
+lxml==5.1.1
+fake-useragent==1.5.1
+numpy==1.26.4
+pandas==2.1.5
+scikit-learn==1.4.2
+joblib==1.4.2
