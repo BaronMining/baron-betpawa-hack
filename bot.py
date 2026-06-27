@@ -104,14 +104,16 @@ def start_websocket():
                 if ws:
                     ws.run_forever()
                 else:
-                    time.sleep(10)
+                    time.sleep(30)
             except Exception as e:
-                logger.error(f"WS error: {e}")
-                time.sleep(10)
+                # Suppress noisy block logging for handshake rejections
+                err_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                logger.warning(f"WS Gateway unavailable ({err_msg[:60]}). Retrying in 30s...")
+                time.sleep(30)
 
     ws_thread = threading.Thread(target=ws_loop, daemon=True)
     ws_thread.start()
-    logger.info("[*] WebSocket thread started")
+    logger.info("[*] Background live data listener configured")
 
 def generate_signal() -> Dict:
     """Generate signal from current history"""
@@ -150,7 +152,6 @@ def format_signal(signal: Dict) -> str:
     cash_str = f"{cashout}x" if cashout else "N/A"
     conf_str = f"{conf:.1%}" if conf else "0%"
 
-    # Custom probability range calculation requested by user for UI display
     prob_min = max(90.0, min(99.9, conf * 100 + 40))
     prob_max = max(95.0, min(99.9, conf * 100 + 49))
     prob_range_str = f"{prob_min:.1f}% - {prob_max:.1f}%"
@@ -167,7 +168,6 @@ def format_signal(signal: Dict) -> str:
     )
 
     if stats:
-        # Fixed the nested formatting expressions here to avoid escaping quotes
         high_str = f"{stats.get('high_streak', 0)}/10"
         low_str = f"{stats.get('low_streak', 0)}/10"
         mean_val = f"{stats.get('mean_20', 'N/A')}"
@@ -200,25 +200,9 @@ def format_signal(signal: Dict) -> str:
 
     return msg
 
-# ===================== TELEGRAM HANDLERS =====================
-async def send_signal(context: ContextTypes.DEFAULT_TYPE):
-    """Send signal to your Telegram ID"""
-    signal = generate_signal()
-    msg = format_signal(signal)
-
-    try:
-        await context.bot.send_message(
-            chat_id=YOUR_TELEGRAM_ID,
-            text=msg,
-            parse_mode='Markdown',
-            disable_web_page_preview=True,
-        )
-        logger.info(f"Sent automatic signal: {signal['signal']}")
-    except Exception as e:
-        logger.error(f"Failed to send automatic message: {e}")
-
-async def auto_signal_loop(context: ContextTypes.DEFAULT_TYPE):
-    """Background task that runs every AUTO_SEND_INTERVAL seconds"""
+# ===================== TELEGRAM ENGINE LOOP ROUTINES =====================
+async def execute_automated_signal_broadcast(bot):
+    """Core signal loop execution logic"""
     if len(round_history) < 20:
         return
 
@@ -236,16 +220,48 @@ async def auto_signal_loop(context: ContextTypes.DEFAULT_TYPE):
         should_send = True
 
     if should_send:
-        await send_signal(context)
+        msg = format_signal(signal)
+        try:
+            await bot.send_message(
+                chat_id=YOUR_TELEGRAM_ID,
+                text=msg,
+                parse_mode='Markdown',
+                disable_web_page_preview=True,
+            )
+            logger.info(f"Automatic signal broadcast successful: {signal['signal']}")
+        except Exception as e:
+            logger.error(f"Failed to transmit engine message payload: {e}")
 
-async def periodic_data_refresh(context: ContextTypes.DEFAULT_TYPE):
-    """Refresh history data periodically and manage dynamic training"""
-    fetch_and_update_history()
+async def start_async_background_tasks(application):
+    """Runs automated loops inside the native app frame to replace job_queue"""
+    bot = application.bot
+    
+    async def loop_signals():
+        await asyncio.sleep(5)  # Init delay
+        while True:
+            try:
+                await execute_automated_signal_broadcast(bot)
+            except Exception as e:
+                logger.error(f"Error in signal loop: {e}")
+            await asyncio.sleep(AUTO_SEND_INTERVAL)
 
-    if len(round_history) >= 50 and not predictor.is_trained:
-        logger.info("Initializing background auto-training...")
-        predictor.train(list(round_history), epochs=30)
-        predictor.save()
+    async def loop_refresh_and_train():
+        await asyncio.sleep(10)  # Init delay
+        while True:
+            try:
+                fetch_and_update_history()
+                if len(round_history) >= 50 and not predictor.is_trained:
+                    logger.info("Initializing background auto-training...")
+                    predictor.train(list(round_history), epochs=30)
+                    predictor.save()
+            except Exception as e:
+                logger.error(f"Error in data refresh loop: {e}")
+            await asyncio.sleep(60)
+
+    # Register as concurrent background processes
+    asyncio.create_task(loop_signals())
+    asyncio.create_task(loop_refresh_and_train())
+    logger.info("[*] Native asynchronous loop background frameworks initialized")
 
 # ===================== COMMANDS =====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -360,7 +376,7 @@ def main():
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    # Establish WebSockets
+    # Establish WebSockets listener thread
     start_websocket()
 
     # Build Application
@@ -374,12 +390,9 @@ def main():
     application.add_handler(CommandHandler("train", force_train))
     application.add_handler(CommandHandler("refresh", force_refresh))
 
-    # Job Queue Setup for Automated Intervals
-    job_queue = application.job_queue
-    # Continuous calculation analysis interval
-    job_queue.run_repeating(auto_signal_loop, interval=AUTO_SEND_INTERVAL, first=5)
-    # Background scraping fallback interval sync
-    job_queue.run_repeating(periodic_data_refresh, interval=60, first=10)
+    # Initialize task runners explicitly after engine setup completes
+    loop = asyncio.get_event_loop()
+    loop.create_task(start_async_background_tasks(application))
 
     # Block run loop execution
     logger.info("🚀 BARON MILLION-AI Telegram Interface Engine Deploying Successfully!")
