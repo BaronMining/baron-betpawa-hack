@@ -1,10 +1,8 @@
 import cloudscraper
-import websocket
 import json
 import time
 import random
 import re
-import requests
 from typing import List, Dict, Optional, Callable
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -17,16 +15,19 @@ class BetpawaScraper:
     """
     Multi-layer anti-detection scraper for Betpawa Aviator.
     Bypasses Cloudflare IUAM, TLS fingerprinting, rate limiting, and bot detection.
+    Uses HTTP scraping only — no WebSocket.
     """
 
     def __init__(self):
         self.active_domain = None
         self.active_game_path = None
         self.session = None
+        self.last_fetched_rounds = set()  # Track seen rounds to avoid duplicates
         self._init_session()
         self._discover_endpoints()
 
     def _get_random_headers(self):
+        """Generate random browser-like headers for each request"""
         ua = random.choice(USER_AGENTS)
         headers = BROWSER_HEADERS.copy()
         headers["User-Agent"] = ua
@@ -35,6 +36,11 @@ class BetpawaScraper:
         return headers
 
     def _init_session(self):
+        """
+        Initialize a cloudscraper session that bypasses Cloudflare.
+        cloudscraper handles JS challenge solving, TLS fingerprint spoofing,
+        and cookie persistence automatically.
+        """
         self.session = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
@@ -48,6 +54,7 @@ class BetpawaScraper:
         self.session.headers.update(self._get_random_headers())
 
     def _discover_endpoints(self):
+        """Find the correct Betpawa domain and game path for Aviator"""
         print("[*] Discovering Betpawa Aviator endpoints...")
         for domain in BETPAWA_DOMAINS:
             for path in GAME_PATHS:
@@ -64,6 +71,7 @@ class BetpawaScraper:
                 except Exception as e:
                     print(f"[!] {url} -> {str(e)[:50]}")
                     continue
+        # Fallback
         self.active_domain = BETPAWA_DOMAINS[0]
         self.active_game_path = GAME_PATHS[0]
         print(f"[!] Using fallback: {self.active_domain}{self.active_game_path}")
@@ -72,7 +80,7 @@ class BetpawaScraper:
     def base_url(self):
         return f"{self.active_domain}{self.active_game_path}"
 
-    def fetch_page(self):
+    def fetch_page(self) -> Optional[str]:
         """Fetch the Aviator game page, bypassing Cloudflare"""
         for attempt in range(3):
             try:
@@ -92,21 +100,167 @@ class BetpawaScraper:
                 time.sleep(5)
         return None
 
-    def fetch_round_history(self, max_retries=3):
-        """Scrape live round history from the game page"""
+    def _extract_multipliers_from_json(self, data, depth=0) -> List[float]:
+        """Recursively extract multiplier values from nested JSON/dict structures"""
+        multipliers = []
+        if depth > 10:
+            return multipliers
+        
+        if isinstance(data, dict):
+            # Check for known multiplier keys
+            for key in ['multiplier', 'crash', 'value', 'result', 'finalMultiplier']:
+                if key in data:
+                    val = data[key]
+                    if isinstance(val, (int, float)) and 1.0 <= val <= 1000:
+                        multipliers.append(float(val))
+            
+            # Check for list/array fields containing rounds
+            for key in ['history', 'rounds', 'results', 'previousRounds', 'lastRounds', 
+                       'multipliers', 'crashHistory', 'data', 'items', 'list',
+                       'roundHistory', 'gameHistory', 'recentRounds']:
+                if key in data and isinstance(data[key], list):
+                    for item in data[key]:
+                        multipliers.extend(self._extract_multipliers_from_json(item, depth + 1))
+            
+            # Recurse into all values
+            for v in data.values():
+                multipliers.extend(self._extract_multipliers_from_json(v, depth + 1))
+                
+        elif isinstance(data, list):
+            for item in data:
+                multipliers.extend(self._extract_multipliers_from_json(item, depth + 1))
+        
+        return multipliers
+
+    def _parse_rounds_from_html(self, soup: BeautifulSoup) -> List[Dict]:
+        """Parse round history from HTML elements on the page"""
+        rounds = []
+        
+        # Look for elements that contain multiplier values
+        selectors = [
+            '[class*="history"] [class*="value"]',
+            '[class*="history"] [class*="multiplier"]',
+            '[class*="round"] [class*="value"]',
+            '[class*="round"] [class*="multiplier"]',
+            '[class*="result"] [class*="value"]',
+            '[data-testid*="history"]',
+            '[data-testid*="round"]',
+            'span[class*="multiplier"]',
+            'div[class*="history-item"]',
+            'div[class*="round-item"]',
+        ]
+        
+        for selector in selectors:
+            elements = soup.select(selector)
+            for elem in elements:
+                text = elem.get_text(strip=True)
+                # Match patterns like "1.23x", "2.45", "3.67X"
+                mult_match = re.search(r'(\d+\.?\d*)\s*x?', text, re.IGNORECASE)
+                if mult_match:
+                    val = float(mult_match.group(1))
+                    if 1.0 <= val <= 1000:
+                        rounds.append({
+                            "round_id": f"html_{time.time()}_{random.random()}",
+                            "multiplier": val,
+                            "timestamp": datetime.now().isoformat(),
+                        })
+        
+        return rounds
+
+    def fetch_round_history(self, max_retries=3) -> List[Dict]:
+        """
+        Scrape live round history from the Betpawa Aviator game page.
+        
+        Uses multiple extraction methods:
+        1. Parse JSON from script tags (__NEXT_DATA__, __NUXT__, __INITIAL_STATE__)
+        2. Extract from embedded JS objects
+        3. Parse HTML history elements
+        """
         for attempt in range(max_retries):
             html = self.fetch_page()
             if not html:
                 continue
 
-            rounds = []
+            all_rounds = []
             soup = BeautifulSoup(html, 'html.parser')
-
-            # Method 1: Parse script tags with embedded JSON
             scripts = soup.find_all('script')
+            
+            # Method 1: Parse __NEXT_DATA__ (Next.js apps)
+            for script in scripts:
+                if script.get('id') == '__NEXT_DATA__':
+                    try:
+                        data = json.loads(script.string)
+                        multipliers = self._extract_multipliers_from_json(data)
+                        for m in multipliers:
+                            all_rounds.append({
+                                "round_id": f"next_{time.time()}_{random.random()}",
+                                "multiplier": m,
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        pass
+            
+            # Method 2: Parse __NUXT__ (Nuxt.js apps)
+            for script in scripts:
+                if script.get('id') == '__NUXT__':
+                    try:
+                        data = json.loads(script.string)
+                        multipliers = self._extract_multipliers_from_json(data)
+                        for m in multipliers:
+                            all_rounds.append({
+                                "round_id": f"nuxt_{time.time()}_{random.random()}",
+                                "multiplier": m,
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        pass
+            
+            # Method 3: Parse __INITIAL_STATE__
+            for script in scripts:
+                if script.get('id') == '__INITIAL_STATE__':
+                    try:
+                        data = json.loads(script.string)
+                        multipliers = self._extract_multipliers_from_json(data)
+                        for m in multipliers:
+                            all_rounds.append({
+                                "round_id": f"init_{time.time()}_{random.random()}",
+                                "multiplier": m,
+                                "timestamp": datetime.now().isoformat(),
+                            })
+                    except (json.JSONDecodeError, AttributeError, TypeError):
+                        pass
+            
+            # Method 4: Parse inline JSON objects from any script
             for script in scripts:
                 if script.string:
-                    for pattern in [
+                    # Look for JSON arrays containing multiplier data
+                    json_patterns = [
+                        r'window\.__INITIAL_STATE__\s*=\s*({.*?});',
+                        r'window\.__DATA__\s*=\s*({.*?});',
+                        r'const\s+historyData\s*=\s*({.*?});',
+                        r'var\s+roundData\s*=\s*({.*?});',
+                        r'let\s+gameData\s*=\s*({.*?});',
+                    ]
+                    for pattern in json_patterns:
+                        match = re.search(pattern, script.string, re.DOTALL)
+                        if match:
+                            try:
+                                data = json.loads(match.group(1))
+                                multipliers = self._extract_multipliers_from_json(data)
+                                for m in multipliers:
+                                    all_rounds.append({
+                                        "round_id": f"inline_{time.time()}_{random.random()}",
+                                        "multiplier": m,
+                                        "timestamp": datetime.now().isoformat(),
+                                    })
+                            except (json.JSONDecodeError, AttributeError):
+                                pass
+            
+            # Method 5: Look for JSON arrays embedded in script tags
+            for script in scripts:
+                if script.string:
+                    # Try to find JSON arrays with multiplier/round data
+                    array_patterns = [
                         r'"history"\s*:\s*\[(.*?)\]',
                         r'"rounds"\s*:\s*\[(.*?)\]',
                         r'"results"\s*:\s*\[(.*?)\]',
@@ -114,173 +268,87 @@ class BetpawaScraper:
                         r'"lastRounds"\s*:\s*\[(.*?)\]',
                         r'"crashHistory"\s*:\s*\[(.*?)\]',
                         r'"multipliers"\s*:\s*\[(.*?)\]',
-                    ]:
+                        r'"recentRounds"\s*:\s*\[(.*?)\]',
+                        r'"roundHistory"\s*:\s*\[(.*?)\]',
+                    ]
+                    for pattern in array_patterns:
                         match = re.search(pattern, script.string, re.DOTALL)
                         if match:
                             try:
                                 data = json.loads(f"[{match.group(1)}]")
                                 for item in data:
                                     if isinstance(item, dict):
-                                        multiplier = item.get('multiplier') or item.get('value') or item.get('crash') or item.get('result')
-                                        if multiplier:
-                                            rounds.append({
-                                                "round_id": item.get('id', item.get('roundId', str(time.time()))),
-                                                "multiplier": float(multiplier),
+                                        m = (item.get('multiplier') or item.get('value') or 
+                                             item.get('crash') or item.get('result'))
+                                        if m:
+                                            all_rounds.append({
+                                                "round_id": item.get('id', item.get('roundId', f"array_{time.time()}_{random.random()}")),
+                                                "multiplier": float(m),
                                                 "timestamp": item.get('timestamp', item.get('time', datetime.now().isoformat())),
                                             })
                                     elif isinstance(item, (int, float)):
-                                        rounds.append({
-                                            "round_id": str(time.time()),
-                                            "multiplier": float(item),
-                                            "timestamp": datetime.now().isoformat(),
-                                        })
-                            except (json.JSONDecodeError, ValueError):
+                                        if 1.0 <= item <= 1000:
+                                            all_rounds.append({
+                                                "round_id": f"array_{time.time()}_{random.random()}",
+                                                "multiplier": float(item),
+                                                "timestamp": datetime.now().isoformat(),
+                                            })
+                            except (json.JSONDecodeError, ValueError, TypeError):
                                 pass
-
-            # Method 2: Parse HTML history elements
-            history_elements = soup.select(
-                '[class*="history"], [class*="round"], [class*="result"], '
-                '[class*="multiplier"], [data-testid*="history"], '
-                '[class*="previous"], [class*="crash"], [class*="game-history"]'
-            )
-            for elem in history_elements:
-                text = elem.get_text(strip=True)
-                mult_match = re.search(r'(\d+\.?\d*)\s*x?', text)
-                if mult_match:
-                    val = float(mult_match.group(1))
-                    if 1.0 <= val <= 1000:
-                        rounds.append({
-                            "round_id": str(time.time() + random.random()),
-                            "multiplier": val,
-                            "timestamp": datetime.now().isoformat(),
-                        })
-
-            # Method 3: Parse __NEXT_DATA__ or __NUXT__
-            for script in scripts:
-                if script.get('id') in ('__NEXT_DATA__', '__NUXT__', '__INITIAL_STATE__'):
-                    try:
-                        data = json.loads(script.string)
-
-                        def find_rounds(obj, depth=0):
-                            if depth > 6:
-                                return []
-                            results = []
-                            if isinstance(obj, dict):
-                                for key in ['history', 'rounds', 'results', 'previousRounds', 'lastRounds', 'multipliers', 'crashHistory', 'data']:
-                                    if key in obj:
-                                        val = obj[key]
-                                        if isinstance(val, list):
-                                            for item in val:
-                                                if isinstance(item, dict):
-                                                    m = item.get('multiplier') or item.get('value') or item.get('crash') or item.get('result')
-                                                    if m:
-                                                        results.append({
-                                                            "round_id": item.get('id', item.get('roundId', str(time.time()))),
-                                                            "multiplier": float(m),
-                                                            "timestamp": item.get('timestamp', item.get('time', datetime.now().isoformat())),
-                                                        })
-                                                elif isinstance(item, (int, float)):
-                                                    results.append({
-                                                        "round_id": str(time.time()),
-                                                        "multiplier": float(item),
-                                                        "timestamp": datetime.now().isoformat(),
-                                                    })
-                                for v in obj.values():
-                                    results.extend(find_rounds(v, depth + 1))
-                            elif isinstance(obj, list):
-                                for item in obj:
-                                    results.extend(find_rounds(item, depth + 1))
-                            return results
-
-                        rounds = find_rounds(data)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
-
-            if rounds:
+            
+            # Method 6: Parse HTML elements for visible round history
+            html_rounds = self._parse_rounds_from_html(soup)
+            all_rounds.extend(html_rounds)
+            
+            if all_rounds:
+                # Deduplicate by multiplier + fuzzy timestamp
                 seen = set()
-                unique = []
-                for r in rounds:
-                    rid = r.get("round_id", "")
-                    if rid not in seen and r["multiplier"] > 0:
-                        seen.add(rid)
-                        unique.append(r)
-                return unique
-
-            print(f"[!] No rounds found on attempt {attempt+1}, retrying...")
-            time.sleep(5)
+                unique_rounds = []
+                for r in all_rounds:
+                    # Create a key based on multiplier rounded to 2 decimals
+                    key = f"{round(r['multiplier'], 2)}_{r.get('round_id', '')[:20]}"
+                    if key not in seen and r["multiplier"] > 0:
+                        seen.add(key)
+                        unique_rounds.append(r)
+                
+                if unique_rounds:
+                    return unique_rounds
+            
+            if attempt < max_retries - 1:
+                wait = 3 + random.random() * 3
+                print(f"[!] No rounds found on attempt {attempt+1}, retrying in {wait:.0f}s...")
+                time.sleep(wait)
 
         return []
 
-    def connect_websocket(self, on_round_end=None):
-        """Connect to Betpawa Spribe WebSocket for live data"""
+    def extract_game_state(self) -> Optional[Dict]:
+        """Extract current game state from the page"""
         html = self.fetch_page()
         if not html:
-            print("[!] Cannot fetch page for WS discovery")
             return None
 
-        # Extract WebSocket URL from page
-        ws_url = None
+        state = {
+            "current_multiplier": 1.0,
+            "round_active": False,
+            "round_id": None
+        }
+
+        # Look for current multiplier in various formats
         patterns = [
-            r'wss?://[^"\'\s]+/ws[^"\'\s]*',
-            r'wss?://[^"\'\s]+/socket[^"\'\s]*',
-            r'wss?://[^"\'\s]+/game[^"\'\s]*',
-            r'wss?://[^"\'\s]+/spribe[^"\'\s]*',
+            r'"currentMultiplier"\s*:\s*(\d+\.?\d*)',
+            r'"multiplier"\s*:\s*(\d+\.?\d*)',
+            r'data-multiplier="(\d+\.?\d*)"',
+            r'class="[^"]*multiplier[^"]*"[^>]*>(\d+\.?\d*)<',
+            r'>(\d+\.?\d*)x<',
         ]
+
         for pattern in patterns:
-            matches = re.findall(pattern, html)
-            for m in matches:
-                if any(kw in m.lower() for kw in ['aviator', 'spribe', 'game', 'socket', 'ws']):
-                    ws_url = m
+            match = re.search(pattern, html)
+            if match:
+                val = float(match.group(1))
+                if 1.0 <= val <= 100:
+                    state["current_multiplier"] = val
+                    state["round_active"] = val > 1.01
                     break
-            if ws_url:
-                break
 
-        if not ws_url:
-            netloc = urllib.parse.urlparse(self.active_domain).netloc
-            ws_candidates = [
-                f"wss://{netloc}/ws",
-                f"wss://{netloc}/socket.io",
-                f"wss://{netloc}/game/aviator/ws",
-                f"wss://spribe.{netloc}/ws",
-                f"wss://{netloc}/aviator/ws",
-            ]
-            ws_url = ws_candidates[0]
-
-        def on_message(ws, message):
-            try:
-                data = json.loads(message)
-                msg_type = data.get("type", "") or data.get("event", "")
-                if msg_type in ("crash", "round_end", "game_over", "result"):
-                    multiplier = data.get("multiplier") or data.get("finalMultiplier") or data.get("value") or 0
-                    round_id = data.get("roundId") or data.get("id") or data.get("round_id") or ""
-                    if multiplier and float(multiplier) > 0 and on_round_end:
-                        on_round_end({
-                            "round_id": round_id,
-                            "multiplier": float(multiplier),
-                            "timestamp": datetime.now().isoformat(),
-                            "hash": data.get("hash", ""),
-                        })
-            except json.JSONDecodeError:
-                pass
-
-        def on_error(ws, error):
-            print(f"[!] WS error: {error}")
-
-        def on_close(ws, code, msg):
-            print(f"[*] WS closed: {code} - {msg}")
-
-        def on_open(ws):
-            ws.send(json.dumps({"type": "subscribe", "channel": "game", "game": "aviator"}))
-            ws.send(json.dumps({"event": "subscribe", "data": {"channel": "game:aviator"}}))
-            ws.send(json.dumps({"type": "join", "game": "aviator"}))
-            print("[✓] WS connected and subscribed")
-
-        ws = websocket.WebSocketApp(
-            ws_url,
-            header={"User-Agent": random.choice(USER_AGENTS)},
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-            on_open=on_open,
-        )
-        return ws
+        return state
