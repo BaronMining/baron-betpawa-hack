@@ -1,5 +1,4 @@
-python-telegram-bot==20.8
-numpy
-pandas
-scikit-learn
-websocket-client
+python-telegram-bot==20.7
+cloudscraper==1.2.71
+beautifulsoup4==4.12.3
+lxml==5.1.1
