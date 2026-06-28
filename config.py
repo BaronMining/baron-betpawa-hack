@@ -4,30 +4,29 @@ import os
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Set in Render dashboard
 YOUR_TELEGRAM_ID = int(os.getenv("TELEGRAM_ID", "7611883512"))
 
-# ===================== BETPAWA =====================
+# ===================== BETPAWA LOGIN =====================
+BETPAWA_USERNAME = os.getenv("BETPAWA_USERNAME", "")
+BETPAWA_PASSWORD = os.getenv("BETPAWA_PASSWORD", "")
+
+# ===================== BETPAWA DOMAINS =====================
 BETPAWA_DOMAINS = [
-    "https://www.betpawa.mw",
     "https://www.betpawa.ug",
+    "https://www.betpawa.mw",
     "https://www.betpawa.rw",
     "https://www.betpawa.co.ke",
-    "https://www.betpawa.co.tz",
-    "https://www.betpawa.com",
 ]
 
 GAME_PATHS = [
     "/casino/game/aviator",
     "/games/game/aviator",
     "/aviator-crash-game",
-    "/game/aviator",
 ]
 
 # ===================== PREDICTION =====================
-CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.50"))
-HISTORY_WINDOW = 200
-SEQUENCE_LENGTH = 20
-AUTO_SEND_INTERVAL = int(os.getenv("AUTO_SEND_INTERVAL", "15"))
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.55"))
+AUTO_SEND_INTERVAL = int(os.getenv("AUTO_SEND_INTERVAL", "12"))
 
-# ===================== ANTI-DETECTION =====================
+# ===================== USER AGENTS =====================
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
