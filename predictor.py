@@ -1,148 +1,161 @@
+"""
+Predictor that combines authenticated data extraction with hash analysis.
+"""
 import os
 import warnings
-import json
-import random
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime
 from collections import deque
-import math
 
 warnings.filterwarnings('ignore')
 
+from hash_analyzer import SpribeHashAnalyzer
 
-class MultiModelPredictor:
+
+class AviatorPredictor:
     """
-    Lightweight statistical predictor — no ML dependencies needed.
-    Uses probability distribution analysis + pattern recognition.
+    Advanced predictor that uses authenticated Betpawa data
+    plus Spribe's SHA-512 hash analysis for maximum accuracy.
     """
 
-    def __init__(self, sequence_length=20, model_dir="model"):
-        self.sequence_length = sequence_length
-        self.model_dir = model_dir
-        os.makedirs(model_dir, exist_ok=True)
-
+    def __init__(self):
+        self.hash_analyzer = SpribeHashAnalyzer()
         self.is_trained = True
-        self.theoretical_mean = 1.97
-        self.house_edge = 0.03
-
-    def _calc_mean(self, arr):
-        return sum(arr) / len(arr) if arr else 0
-
-    def _calc_std(self, arr):
-        if len(arr) < 2:
-            return 0
-        mean = self._calc_mean(arr)
-        variance = sum((x - mean) ** 2 for x in arr) / (len(arr) - 1)
-        return math.sqrt(variance)
-
-    def _calc_median(self, arr):
-        sorted_arr = sorted(arr)
-        n = len(sorted_arr)
-        if n % 2 == 0:
-            return (sorted_arr[n // 2 - 1] + sorted_arr[n // 2]) / 2
-        return sorted_arr[n // 2]
-
-    def generate_signal(self, history):
-        if len(history) < self.sequence_length:
+        self.round_history = deque(maxlen=10000)
+        self.seed_data = []
+        self.deep_analysis = {}
+    
+    def load_historical_data(self, rounds: List[Dict]):
+        """Load 10,000+ rounds for deep analysis"""
+        for r in rounds:
+            m = r.get("multiplier") or r.get("value") or r.get("crash") or r.get("result")
+            if m and float(m) > 0:
+                self.round_history.append(float(m))
+            
+            # Store seed data if available
+            if r.get("serverSeed") or r.get("server_seed"):
+                self.seed_data.append({
+                    "server_seed": r.get("serverSeed") or r.get("server_seed", ""),
+                    "client_seeds": [
+                        r.get("clientSeed", r.get("client_seed", "")),
+                        r.get("clientSeed2", r.get("client_seed_2", "")),
+                        r.get("clientSeed3", r.get("client_seed_3", "")),
+                    ],
+                    "multiplier": float(m) if m else 0,
+                })
+        
+        # Run deep analysis if we have enough data
+        count = len(self.round_history)
+        if count >= 100:
+            print(f"[*] Running deep analysis on {count} rounds...")
+            self.deep_analysis = self.hash_analyzer.analyze_10000_rounds(rounds)
+            
+            # Verify seeds if available
+            if self.seed_data:
+                seed_analysis = self.hash_analyzer.analyze_seed_chain(self.seed_data)
+                self.deep_analysis["seed_verification"] = seed_analysis
+    
+    def generate_signal(self) -> Dict:
+        """Generate the best possible signal using all available data"""
+        history = list(self.round_history)
+        
+        if len(history) < 20:
             return {
                 "signal": "WAIT",
-                "reason": f"Need {self.sequence_length} rounds, have {len(history)}",
+                "reason": f"Collecting data ({len(history)}/20 rounds)",
                 "confidence": 0,
                 "prediction": None,
                 "suggested_cashout": None,
                 "timestamp": datetime.now().isoformat(),
             }
-
-        arr = history[-self.sequence_length:]
-        recent_20 = history[-20:] if len(history) >= 20 else history
-
-        # Basic statistics
-        recent_mean = self._calc_mean(recent_20)
-        recent_std = self._calc_std(recent_20)
-        recent_median = self._calc_median(recent_20)
-
-        # Streak analysis
-        high_streak = sum(1 for x in history[-10:] if x >= 2.0)
-        low_streak = sum(1 for x in history[-10:] if x < 1.5)
-        very_high = sum(1 for x in history[-20:] if x >= 5.0)
-
-        # Mean reversion prediction
-        stat_pred = recent_mean * 0.6 + self.theoretical_mean * 0.4
-        if high_crashes := sum(1 for x in arr if x >= 3.0) >= 3:
-            stat_pred *= 0.85
-        if sum(1 for x in arr if x < 1.5) >= 4:
-            stat_pred *= 1.15
-
-        predicted = max(1.0, stat_pred)
-
-        # Confidence based on volatility and data amount
-        vol_factor = max(0, 1.0 - (recent_std / max(recent_mean, 0.1)) * 0.5)
-        data_factor = min(1.0, len(history) / 100)
-        confidence = round(min(0.95, vol_factor * data_factor), 3)
-
-        # Generate signal
+        
+        # Use hash analyzer for prediction
+        pred = self.hash_analyzer.predict_next_crash_statistical(history)
+        
+        predicted = pred.get("prediction")
+        confidence = pred.get("confidence", 0)
+        reason = pred.get("reason", "Statistical analysis")
+        stats = pred.get("stats", {})
+        
+        # Enhance with deep analysis if available
+        strategy = self.deep_analysis.get("strategy", {})
+        if strategy:
+            # Check current streak conditions
+            recent_5 = history[-5:]
+            low_in_5 = sum(1 for x in recent_5 if x < 1.5)
+            high_in_5 = sum(1 for x in recent_5 if x >= 2.0)
+            
+            key_low = f"after_{low_in_5}_low_in_5"
+            key_high = f"after_{high_in_5}_high_in_5"
+            
+            if key_low in strategy:
+                strat = strategy[key_low]
+                if strat["count"] >= 10:
+                    # Use the strategy data
+                    conf_boost = min(0.15, strat["probability_above_2"] * 0.2)
+                    confidence = min(0.95, confidence + conf_boost)
+                    if predicted:
+                        predicted = round((predicted + strat["avg_next_crash"]) / 2, 2)
+                    reason += f" | Pattern: {strat['count']} historical cases"
+            
+            elif key_high in strategy:
+                strat = strategy[key_high]
+                if strat["count"] >= 10:
+                    reason += f" | Pattern: {strat['count']} historical cases"
+        
+        # Generate signal type
         signal = "SKIP"
-        reason = "Conservative — confidence too low"
         suggested_cashout = None
-
-        if confidence >= 0.50:
+        
+        if confidence >= 0.50 and predicted:
             if predicted >= 5.0:
                 signal = "BUY_HIGH"
                 suggested_cashout = min(predicted, 10.0)
-                reason = f"High multiplier pattern detected ({predicted:.2f}x)"
             elif predicted >= 2.5:
                 signal = "BUY_MEDIUM"
                 suggested_cashout = min(predicted, 5.0)
-                reason = f"Medium multiplier expected ({predicted:.2f}x)"
             elif predicted >= 1.5:
                 signal = "BUY_LOW"
                 suggested_cashout = min(predicted, 2.0)
-                reason = f"Low multiplier expected ({predicted:.2f}x)"
             elif predicted < 1.5:
                 signal = "DANGER"
                 suggested_cashout = 1.2
-                reason = f"Early crash predicted ({predicted:.2f}x) — high risk"
-
-        # Override based on streak analysis
-        if high_streak >= 7:
+        
+        # Apply streak overrides
+        if stats.get("recent_high_streak", 0) >= 6 and predicted and predicted < 3.0:
             signal = "CAUTION"
-            reason = "7+ high rounds recently — correction likely soon"
             suggested_cashout = 1.5
-        elif low_streak >= 6 and predicted >= 2.0:
+            reason = f"Correction after {stats['recent_high_streak']} high rounds"
+        elif stats.get("recent_low_streak", 0) >= 5 and predicted and predicted >= 2.0:
             signal = "OPPORTUNITY"
-            reason = "6+ low rounds — statistical bounce expected"
             suggested_cashout = min(predicted * 1.2, 5.0)
-        elif very_high >= 2 and predicted < 3.0:
-            signal = "AVOID"
-            reason = "Multiple 5x+ recently — volatility too high"
-            suggested_cashout = None
-
+            reason = f"Bounce after {stats['recent_low_streak']} low rounds"
+        
         return {
             "signal": signal,
             "reason": reason,
-            "prediction": round(predicted, 2),
+            "prediction": predicted,
             "confidence": round(confidence, 3),
             "suggested_cashout": suggested_cashout,
             "timestamp": datetime.now().isoformat(),
-            "model_count": 1,
-            "stats": {
-                "mean_20": round(recent_mean, 2),
-                "std_20": round(recent_std, 2),
-                "high_streak": high_streak,
-                "low_streak": low_streak,
-            }
+            "model_count": 2,
+            "data_points": len(history),
+            "stats": stats,
         }
-
+    
+    def get_analysis_summary(self) -> Dict:
+        """Get a summary of the deep analysis"""
+        return self.deep_analysis
+    
     def train(self, history, epochs=0):
-        """No training needed — statistical model only"""
+        """No training needed"""
         if len(history) >= 20:
             self.is_trained = True
-            print(f"[✓] Statistical model ready with {len(history)} data points")
             return True
         return False
-
+    
     def save(self, path=None):
         pass
-
+    
     def load(self, path=None):
         self.is_trained = True
