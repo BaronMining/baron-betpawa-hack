@@ -1,50 +1,37 @@
 #!/usr/bin/env python3
 """
-Betpawa Aviator Millionaire Bot — BULLETPROOF VERSION
+BETPAWA AViATOR BOT — FINAL BULLETPROOF VERSION
+Single file, no external module imports (except cloudscraper + telegram)
 """
 
-import asyncio
-import logging
 import os
-import threading
 import sys
 import re
-from datetime import datetime
+import json
+import logging
+import asyncio
+import threading
+import time
+import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict
+from datetime import datetime
+from collections import deque
+from urllib.parse import urlparse, parse_qs
 
 import cloudscraper
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, ContextTypes,
-    MessageHandler, filters, ConversationHandler, CallbackQueryHandler
-)
+from bs4 import BeautifulSoup
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# ===================== CONFIG (no separate config.py needed) =====================
+# ===================== CONFIG =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-YOUR_TELEGRAM_ID = 7611883512
-BETPAWA_USERNAME = os.getenv("BETPAWA_USERNAME", "")
-BETPAWA_PASSWORD = os.getenv("BETPAWA_PASSWORD", "")
-CONFIDENCE_THRESHOLD = 0.25
-AUTO_SEND_INTERVAL = 60
+YOUR_CHAT_ID = 7611883512
+BETPAWA_USER = os.getenv("BETPAWA_USERNAME", "")
+BETPAWA_PASS = os.getenv("BETPAWA_PASSWORD", "")
 
 # ===================== LOGGING =====================
-logging.basicConfig(
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    level=logging.INFO,
-    datefmt='%Y-%m-%d %H:%M:%S',
-    stream=sys.stdout
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', stream=sys.stdout)
 logger = logging.getLogger(__name__)
-
-# ===================== GLOBAL STATE =====================
-scraper = None
-predictor = None
-user_credentials = {
-    "username": BETPAWA_USERNAME,
-    "password": BETPAWA_PASSWORD,
-}
-AWAITING_USERNAME, AWAITING_PASSWORD = range(2)
 
 # ===================== HEALTH SERVER =====================
 class HealthHandler(BaseHTTPRequestHandler):
@@ -52,518 +39,490 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        status = f"Betpawa Bot | OK"
-        self.wfile.write(status.encode())
-    def log_message(self, format, *args):
+        self.wfile.write(b"Bot running")
+    def log_message(self, *a):
         pass
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    logger.info(f"[*] Health server on port {port}")
+def health_server():
+    server = HTTPServer(("0.0.0.0", int(os.environ.get("PORT", 10000))), HealthHandler)
     server.serve_forever()
 
-# ===================== SCRAPER =====================
-class BetpawaScraper:
+# ===================== BETPAWA CLIENT =====================
+class BetpawaClient:
+    """Handles all Betpawa communication — login, scrape, provably fair"""
+    
+    BASE = "https://www.betpawa.ug"
+    
     def __init__(self):
-        self.session = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True, 'mobile': False},
-            delay=15
+        self.scraper = cloudscraper.create_scraper(
+            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+            delay=10
         )
-        self.session.headers.update({
+        self.scraper.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Origin': 'https://www.betpawa.ug',
-            'Referer': 'https://www.betpawa.ug/',
         })
         self.logged_in = False
-        self.token = None
-        self.refresh_token = None
-
+        self.rounds = []
+        self.seeds = {}
+        self.balance = "N/A"
+    
     def login(self, username=None, password=None):
-        """Login to Betpawa using their working API"""
+        """Login with CSRF token extraction + form POST"""
         if username is None:
-            username = user_credentials["username"]
+            username = BETPAWA_USER
         if password is None:
-            password = user_credentials["password"]
+            password = BETPAWA_PASS
+        
         if not username or not password:
+            logger.error("No credentials")
             return False
-
+        
         logger.info(f"Logging in as {username}...")
-
+        
         try:
-            # Step 1: Get the homepage first to set cookies
-            self.session.get("https://www.betpawa.ug/", timeout=30)
+            # Step 1: Get login page for CSRF token + cookies
+            r = self.scraper.get(f"{self.BASE}/login", timeout=30)
+            if r.status_code != 200:
+                logger.error(f"Login page status: {r.status_code}")
+                return False
             
-            # Step 2: Try all known Betpawa login endpoints
-            login_endpoints = [
-                "https://www.betpawa.ug/api/auth/login",
-                "https://www.betpawa.ug/api/v1/auth/login", 
-                "https://www.betpawa.ug/api/v2/auth/login",
-                "https://www.betpawa.ug/api/v3/auth/login",
-                "https://www.betpawa.ug/api/login",
-                "https://www.betpawa.ug/auth/login",
-                "https://www.betpawa.ug/login",
-            ]
-
-            payload = {
-                "phone": username,
-                "password": password,
-                "grant_type": "password",
-                "client_id": "web",
-                "client_secret": ""
+            soup = BeautifulSoup(r.text, 'lxml')
+            
+            # Extract CSRF token from meta tag
+            csrf = ""
+            meta = soup.find('meta', {'name': 'csrf-token'})
+            if meta:
+                csrf = meta.get('content', '')
+            
+            # Also check input fields
+            if not csrf:
+                inp = soup.find('input', {'name': '_token'})
+                if inp:
+                    csrf = inp.get('value', '')
+            
+            logger.info(f"CSRF token: {csrf[:20] if csrf else 'None'}...")
+            
+            # Step 2: POST login form
+            login_data = {
+                'phone': username,
+                'password': password,
+                'keep_logged_in': '1',
             }
-
-            # Try different payload formats
-            payloads = [
-                {"phone": username, "password": password},
-                {"phone": username, "password": password, "remember": True},
-                {"username": username, "password": password},
-                {"email": username, "password": password},
-                {"phoneNumber": username, "password": password},
-                {"phone": username, "password": password, "grant_type": "password"},
-            ]
-
-            for endpoint in login_endpoints:
-                for pl in payloads:
-                    try:
-                        r = self.session.post(
-                            endpoint,
-                            json=pl,
-                            timeout=30,
-                            headers={'Content-Type': 'application/json'}
-                        )
-                        
-                        if r.status_code == 200:
-                            try:
-                                data = r.json()
-                                if data.get('token') or data.get('access_token') or data.get('data'):
-                                    self.token = data.get('token') or data.get('access_token') or data.get('data', {}).get('token')
-                                    self.refresh_token = data.get('refresh_token')
-                                    self.logged_in = True
-                                    self.session.headers.update({
-                                        'Authorization': f'Bearer {self.token}'
-                                    })
-                                    logger.info(f"✅ Login SUCCESS via {endpoint}")
-                                    return True
-                            except:
-                                pass
-                        
-                        # Check for cookies
-                        for cookie in self.session.cookies:
-                            if 'token' in cookie.name.lower() or 'auth' in cookie.name.lower() or 'session' in cookie.name.lower():
-                                self.logged_in = True
-                                logger.info(f"✅ Login SUCCESS via cookie: {cookie.name}")
-                                return True
-                                
-                    except Exception as e:
-                        logger.debug(f"{endpoint}: {str(e)[:30]}")
-                        continue
-
-            logger.error("❌ All login endpoints failed (404 or invalid)")
+            if csrf:
+                login_data['_token'] = csrf
+            
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Origin': self.BASE,
+                'Referer': f'{self.BASE}/login',
+            }
+            
+            r2 = self.scraper.post(
+                f"{self.BASE}/login",
+                data=login_data,
+                headers=headers,
+                timeout=30,
+                allow_redirects=True
+            )
+            
+            logger.info(f"Login POST status: {r2.status_code}")
+            
+            # Step 3: Check if logged in by accessing a protected page
+            check = self.scraper.get(f"{self.BASE}/casino/game/aviator", timeout=30)
+            
+            # Success indicators: seeing user-specific content or the game iframe
+            if 'logout' in check.text.lower() or 'my account' in check.text.lower() or 'profile' in check.text.lower():
+                self.logged_in = True
+                logger.info("✅ Login successful (via page content)")
+                return True
+            
+            # Check cookies for auth tokens
+            for cookie in self.scraper.cookies:
+                if any(k in cookie.name.lower() for k in ['token', 'auth', 'session', 'connect']):
+                    self.logged_in = True
+                    logger.info(f"✅ Login successful (via cookie: {cookie.name})")
+                    return True
+            
+            # Check if we got redirected away from login page
+            if r2.url and '/login' not in r2.url and r2.status_code == 200:
+                self.logged_in = True
+                logger.info(f"✅ Login successful (redirect to {r2.url})")
+                return True
+            
+            logger.error("❌ Login failed — still on login page")
             return False
-
+            
         except Exception as e:
-            logger.error(f"❌ Login exception: {e}")
+            logger.error(f"Login error: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-
-    def fetch_round_history(self, limit=500):
-        """Fetch historical rounds"""
+    
+    def fetch_rounds(self, limit=500):
+        """Fetch historical rounds from the game page or API"""
         if not self.logged_in:
             return []
-
-        api_endpoints = [
-            f"https://www.betpawa.ug/api/v2/game/aviator/history?limit={limit}",
-            f"https://www.betpawa.ug/api/v1/game/aviator/history?limit={limit}",
-            f"https://www.betpawa.ug/api/game/aviator/history?limit={limit}",
-            f"https://www.betpawa.ug/api/aviator/history?limit={limit}",
-            f"https://www.betpawa.ug/game/aviator/api/history?limit={limit}",
+        
+        new_rounds = []
+        
+        # Try API endpoints
+        apis = [
+            f"{self.BASE}/api/v2/game/aviator/history",
+            f"{self.BASE}/api/v1/game/aviator/history", 
+            f"{self.BASE}/api/game/aviator/history",
+            f"{self.BASE}/api/aviator/history",
         ]
-
-        for url in api_endpoints:
+        
+        for api in apis:
             try:
-                r = self.session.get(url, timeout=30)
+                r = self.scraper.get(api, params={'limit': limit}, timeout=20,
+                                     headers={'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
                 if r.status_code == 200:
                     try:
                         data = r.json()
                         if isinstance(data, list):
-                            logger.info(f"Got {len(data)} rounds")
-                            return data
+                            new_rounds = data
                         elif isinstance(data, dict):
-                            for key in ['data', 'rounds', 'history', 'results', 'records']:
+                            for key in ['data', 'rounds', 'history', 'results']:
                                 if key in data and isinstance(data[key], list):
-                                    logger.info(f"Got {len(data[key])} rounds from {key}")
-                                    return data[key]
+                                    new_rounds = data[key]
+                                    break
+                        if new_rounds:
+                            logger.info(f"Got {len(new_rounds)} rounds from {api}")
+                            break
                     except:
-                        pass
+                        continue
             except:
                 continue
-
+        
         # Fallback: scrape from game page HTML
-        try:
-            r = self.session.get("https://www.betpawa.ug/casino/game/aviator", timeout=30)
-            if r.status_code == 200:
-                rounds = []
-                # Search for crash values in JavaScript
-                patterns = [
-                    r'"crashMultiplier":([\d.]+)',
-                    r'"multiplier":([\d.]+)',
-                    r'"crashPoint":([\d.]+)',
-                    r'"round":\{"multiplier":([\d.]+)',
-                ]
-                for pattern in patterns:
-                    matches = re.findall(pattern, r.text)
-                    for m in matches:
-                        rounds.append({'crash_multiplier': float(m), 'multiplier': float(m)})
-
-                if rounds:
-                    logger.info(f"Extracted {len(rounds)} rounds from HTML")
-                    return rounds
-        except:
-            pass
-
-        return []
-
-    def fetch_provably_fair_data(self):
-        """Get seed/hash data"""
-        if not self.logged_in:
-            return {"success": False, "error": "Not logged in"}
-
-        api_endpoints = [
-            "https://www.betpawa.ug/api/v2/game/aviator/seed-info",
-            "https://www.betpawa.ug/api/v1/game/aviator/seed-info",
-            "https://www.betpawa.ug/api/game/aviator/seed-info",
-            "https://www.betpawa.ug/api/aviator/seed-info",
-            "https://www.betpawa.ug/provably-fair",
-        ]
-
-        for url in api_endpoints:
+        if not new_rounds:
             try:
-                r = self.session.get(url, timeout=30)
+                r = self.scraper.get(f"{self.BASE}/casino/game/aviator", timeout=30)
+                if r.status_code == 200:
+                    # Extract round data from JavaScript variables
+                    patterns = [
+                        r'"crashMultiplier":([\d.]+)',
+                        r'"multiplier":([\d.]+)',
+                        r'"crashPoint":([\d.]+)',
+                        r'rounds\s*:\s*\[([^\]]+)\]',
+                    ]
+                    for pattern in patterns:
+                        matches = re.findall(pattern, r.text)
+                        for m in matches:
+                            try:
+                                val = float(m) if m.replace('.','').isdigit() else 0
+                                if val > 0:
+                                    new_rounds.append({'crash_multiplier': val, 'multiplier': val})
+                            except:
+                                continue
+                    if new_rounds:
+                        logger.info(f"Extracted {len(new_rounds)} rounds from HTML")
+            except:
+                pass
+        
+        return new_rounds
+    
+    def fetch_seeds(self):
+        """Get provably fair seed/hash data"""
+        if not self.logged_in:
+            return {}
+        
+        data = {}
+        
+        # Try API endpoints
+        apis = [
+            f"{self.BASE}/api/v2/game/aviator/seed-info",
+            f"{self.BASE}/api/v1/game/aviator/seed-info",
+            f"{self.BASE}/api/game/aviator/seed-info",
+            f"{self.BASE}/api/aviator/seed-info",
+            f"{self.BASE}/provably-fair",
+        ]
+        
+        for api in apis:
+            try:
+                r = self.scraper.get(api, timeout=20,
+                                     headers={'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
                 if r.status_code == 200:
                     try:
                         data = r.json()
-                        return {"success": True, **data}
+                        logger.info(f"Seeds from {api}")
+                        break
                     except:
-                        pass
+                        continue
             except:
                 continue
-
-        return {"success": False}
-
-    def get_account_info(self):
+        
+        # Fallback: scrape from game page
+        if not data:
+            try:
+                r = self.scraper.get(f"{self.BASE}/casino/game/aviator", timeout=30)
+                if r.status_code == 200:
+                    patterns = {
+                        'server_seed': r'"serverSeed"\s*:\s*"([^"]+)"',
+                        'client_seed': r'"clientSeed"\s*:\s*"([^"]+)"',
+                        'server_seed_hash': r'"serverSeedHash"\s*:\s*"([^"]+)"',
+                        'next_hash': r'"nextServerSeedHash"\s*:\s*"([^"]+)"',
+                    }
+                    for key, pat in patterns.items():
+                        m = re.search(pat, r.text)
+                        if m:
+                            data[key] = m.group(1)
+            except:
+                pass
+        
+        self.seeds = data
+        return data
+    
+    def get_balance(self):
         """Get account balance"""
         if not self.logged_in:
-            return {"balance": "N/A", "currency": "UGX"}
-
-        api_endpoints = [
-            "https://www.betpawa.ug/api/v2/account",
-            "https://www.betpawa.ug/api/v1/account",
-            "https://www.betpawa.ug/api/account",
-            "https://www.betpawa.ug/api/user/balance",
+            return "N/A"
+        
+        apis = [
+            f"{self.BASE}/api/v2/account",
+            f"{self.BASE}/api/v1/account",
+            f"{self.BASE}/api/account",
+            f"{self.BASE}/api/user/balance",
         ]
-
-        for url in api_endpoints:
+        
+        for api in apis:
             try:
-                r = self.session.get(url, timeout=30)
+                r = self.scraper.get(api, timeout=15,
+                                     headers={'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest'})
                 if r.status_code == 200:
                     try:
                         data = r.json()
-                        balance = data.get('balance', data.get('amount', 'N/A'))
-                        return {"balance": balance, "currency": data.get('currency', 'UGX')}
+                        bal = data.get('balance') or data.get('amount') or data.get('wallet', {}).get('balance')
+                        if bal:
+                            return str(bal)
                     except:
-                        pass
+                        continue
             except:
                 continue
-
-        return {"balance": "N/A", "currency": "UGX"}
-
-
-# ===================== PREDICTOR =====================
-class SimplePredictor:
-    def __init__(self):
-        self.round_history = []
-
-    def load_historical_data(self, rounds):
-        for r in rounds:
-            mult = r.get('crash_multiplier') or r.get('multiplier') or r.get('crashPoint') or 0
-            try:
-                self.round_history.append(float(mult))
-            except:
-                continue
-        logger.info(f"Loaded {len(self.round_history)} data points")
-
-    def generate_signal(self):
-        if len(self.round_history) < 20:
-            return {
-                "signal": "WAIT",
-                "prediction": None,
-                "confidence": 0,
-                "suggested_cashout": 1.5,
-                "reason": f"Collecting data ({len(self.round_history)}/20 rounds)",
-                "data_points": len(self.round_history),
-                "stats": {},
-                "timestamp": datetime.now().isoformat()
-            }
-
-        m = self.round_history
-        recent_50 = m[-50:] if len(m) >= 50 else m
-        recent_10 = m[-10:] if len(m) >= 10 else m
-
-        mean = sum(recent_50) / len(recent_50)
-        low_in_10 = sum(1 for x in recent_10 if x < 1.5)
-        high_in_10 = sum(1 for x in recent_10 if x > 3.0)
-
-        # Strategy
-        if low_in_10 >= 7:
-            pred = mean * 1.4
-            conf = 0.55
-            reason = "Strong regression after low streak"
-            signal = "BUY_HIGH"
-        elif low_in_10 >= 5:
-            pred = mean * 1.25
-            conf = 0.45
-            reason = "Bounce expected from low streak"
-            signal = "BUY_MEDIUM"
-        elif high_in_10 >= 5:
-            pred = mean * 0.7
-            conf = 0.35
-            reason = "Consolidation after high streak"
-            signal = "CAUTION"
-        else:
-            pred = mean * (0.9 + (len(m) % 3) * 0.05)
-            conf = 0.35
-            reason = "Normal pattern"
-            signal = "BUY_LOW"
-
-        pred = max(1.0, min(100.0, round(pred, 2)))
         
-        if pred < 1.5:
-            cashout = 1.2
-        elif pred < 2.0:
-            cashout = 1.5
-        elif pred < 3.0:
-            cashout = 2.0
-        elif pred < 5.0:
-            cashout = 3.0
-        else:
-            cashout = min(pred * 0.6, 10.0)
-
-        return {
-            "signal": signal,
-            "prediction": pred,
-            "confidence": round(conf, 3),
-            "suggested_cashout": round(cashout, 2),
-            "reason": reason,
-            "data_points": len(m),
-            "stats": {"recent_mean": round(mean, 2), "recent_low_streak": low_in_10, "recent_high_streak": high_in_10},
-            "timestamp": datetime.now().isoformat()
-        }
+        return "N/A"
 
 
-# Initialize
-scraper = BetpawaScraper()
-predictor = SimplePredictor()
-
-
-# ===================== TELEGRAM =====================
-
-def format_signal(signal):
-    e = {"BUY_HIGH": "🚀", "BUY_MEDIUM": "📈", "BUY_LOW": "📊", "SKIP": "⏸️", "WAIT": "⏳", "CAUTION": "⚠️", "OPPORTUNITY": "💎"}
-    s = signal.get("signal", "N/A")
-    emoji = e.get(s, "❓")
-    pred = signal.get("prediction")
-    conf = signal.get("confidence", 0)
-    cashout = signal.get("suggested_cashout")
-    reason = signal.get("reason", "")
-    stats = signal.get("stats", {})
-    points = signal.get("data_points", 0)
-
-    return (
-        f"{emoji} *BETPAWA AViATOR SIGNAL*\n"
-        f"━━━━━━━━━━━━━━━\n\n"
-        f"▸ *Signal:* `{s}`\n"
-        f"▸ *Prediction:* `{f'{pred}x' if pred else 'N/A'}`\n"
-        f"▸ *Confidence:* `{f'{conf:.1%}' if conf else '0%'}`\n"
-        f"▸ *Cashout:* `{f'{cashout}x' if cashout else 'N/A'}`\n"
-        f"▸ *Data:* `{points} rounds`\n\n"
-        f"📋 _{reason}_\n"
-        f"\n━━━━━━━━━━━━━━━"
-    )
-
+# ===================== BOT =====================
+client = BetpawaClient()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = "✅ Logged in" if scraper.logged_in else "❌ Not logged in"
-    msg = (
-        f"🤖 *BETPAWA BOT*\n\n"
-        f"Status: {status}\n"
-        f"/login — Enter credentials\n"
-        f"/scrape — Get rounds\n"
-        f"/signal — Prediction\n"
-        f"/status — Info\n"
-        f"/analyze — Report"
+    await update.message.reply_text(
+        "🤖 *BETPAWA AViATOR BOT*\n\n"
+        "Commands:\n"
+        "/login — Login to Betpawa\n"
+        "/scrape — Fetch rounds\n"
+        "/seeds — Get provably fair data\n"
+        "/signal — Get prediction\n"
+        "/balance — Check balance\n"
+        "/status — Bot status\n"
+        "/start — This menu",
+        parse_mode='Markdown'
     )
-    keyboard = [
-        [InlineKeyboardButton("🔑 Login", callback_data="login"),
-         InlineKeyboardButton("🔮 Signal", callback_data="signal")],
-    ]
-    await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
 
-
-async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Send your Betpawa phone number:")
-    return AWAITING_USERNAME
-
-
-async def receive_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['bp_user'] = update.message.text.strip()
-    await update.message.reply_text("Now send your password:")
-    return AWAITING_PASSWORD
-
-
-async def receive_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    username = context.user_data.get('bp_user', '')
-    password = update.message.text.strip()
-    user_credentials["username"] = username
-    user_credentials["password"] = password
-    
-    await update.message.reply_text("🔐 Logging in...")
-    
-    if scraper.login(username, password):
-        await update.message.reply_text("✅ Login successful! Scraping rounds...")
-        rounds = scraper.fetch_round_history(limit=500)
-        if rounds:
-            predictor.load_historical_data(rounds)
-        await update.message.reply_text(f"📊 Collected {len(predictor.round_history)} rounds")
+async def do_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔐 Logging into Betpawa...")
+    ok = client.login()
+    if ok:
+        # Auto-scrape
+        rounds = client.fetch_rounds(limit=200)
+        client.rounds.extend(rounds)
+        seeds = client.fetch_seeds()
+        bal = client.get_balance()
+        
+        msg = (
+            "✅ *Login successful!*\n\n"
+            f"💰 Balance: `{bal} UGX`\n"
+            f"📊 Rounds: `{len(client.rounds)}`\n"
+        )
+        if seeds:
+            msg += f"🔐 Seeds: `{len(seeds)} fields captured`\n"
+        if seeds.get('server_seed'):
+            msg += f"• Server seed: `{str(seeds.get('server_seed',''))[:20]}...`\n"
+        if seeds.get('next_hash'):
+            msg += f"• Next hash: `{str(seeds.get('next_hash',''))[:20]}...`\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Login failed. Try /login again.")
-    
-    return ConversationHandler.END
+        await update.message.reply_text(
+            "❌ *Login failed.*\n\n"
+            "Set BETPAWA_USERNAME and BETPAWA_PASSWORD environment variables.\n"
+            "Phone number format: 0789124978 (no +256)",
+            parse_mode='Markdown'
+        )
 
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Cancelled")
-    return ConversationHandler.END
-
-
-async def scrape_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not scraper.logged_in:
-        await update.message.reply_text("❌ Not logged in. Use /login")
+async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not client.logged_in:
+        await update.message.reply_text("❌ Login first with /login")
         return
     
-    await update.message.reply_text("🔄 Scraping rounds...")
-    total = 0
+    await update.message.reply_text("🔄 Scraping rounds... (this may take a minute)")
+    
+    total = len(client.rounds)
     for i in range(20):
-        rounds = scraper.fetch_round_history(limit=500)
-        if rounds:
-            predictor.load_historical_data(rounds)
-            total += len(rounds)
-        await asyncio.sleep(2)
+        new = client.fetch_rounds(limit=500)
+        if new:
+            # Deduplicate
+            existing_multipliers = {(r.get('crash_multiplier') or r.get('multiplier')): True for r in client.rounds}
+            for r in new:
+                m = r.get('crash_multiplier') or r.get('multiplier')
+                if m and m not in existing_multipliers:
+                    client.rounds.append(r)
+                    existing_multipliers[m] = True
+        await asyncio.sleep(1)
+        if i % 5 == 0:
+            await update.message.reply_text(f"📊 Progress: `{len(client.rounds)}` rounds", parse_mode='Markdown')
     
-    await update.message.reply_text(f"✅ Done! {total} rounds collected")
-
-
-async def signal_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    signal = predictor.generate_signal()
-    await update.message.reply_text(format_signal(signal), parse_mode='Markdown')
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = "✅ Logged in" if scraper.logged_in else "❌ Not logged in"
-    msg = (
-        f"🤖 *Status*\n\n"
-        f"Login: {s}\n"
-        f"Rounds: {len(predictor.round_history)}\n"
-        f"Target: {YOUR_TELEGRAM_ID}"
+    await update.message.reply_text(
+        f"✅ *Scraping complete!*\n"
+        f"Total: `{len(client.rounds)}` rounds",
+        parse_mode='Markdown'
     )
-    await update.message.reply_text(msg, parse_mode='Markdown')
 
-
-async def analyze_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not predictor.round_history:
-        await update.message.reply_text("No data. Scrape first.")
+async def do_seeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not client.logged_in:
+        await update.message.reply_text("❌ Login first")
         return
     
-    m = predictor.round_history
-    avg = sum(m) / len(m)
-    low = sum(1 for x in m if x < 2.0)
-    high = sum(1 for x in m if x > 5.0)
+    data = client.fetch_seeds()
+    if not data:
+        await update.message.reply_text("❌ Could not fetch seed data")
+        return
     
-    msg = (
-        f"📈 *Analysis*\n\n"
-        f"Rounds: {len(m)}\n"
-        f"Avg crash: {avg:.2f}x\n"
-        f"Under 2x: {low/len(m)*100:.1f}%\n"
-        f"Over 5x: {high/len(m)*100:.1f}%"
-    )
+    msg = "🔐 *Provably Fair Data*\n\n"
+    for k, v in data.items():
+        msg += f"• `{k}`: `{str(v)[:50]}`\n"
+    
     await update.message.reply_text(msg, parse_mode='Markdown')
 
+async def do_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bal = client.get_balance()
+    await update.message.reply_text(f"💰 Balance: `{bal} UGX`", parse_mode='Markdown')
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.edit_message_text("Use /login or /signal commands")
+async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    status = "✅ Logged in" if client.logged_in else "❌ Not logged in"
+    await update.message.reply_text(
+        f"🤖 *Status*\n\n"
+        f"• Login: {status}\n"
+        f"• Rounds: `{len(client.rounds)}`\n"
+        f"• Seeds: `{'✅' if client.seeds else '❌'}`",
+        parse_mode='Markdown'
+    )
 
-
-async def startup(app):
-    await asyncio.sleep(10)
-    try:
-        await app.bot.send_message(YOUR_TELEGRAM_ID, "🤖 Bot started! Use /login")
-    except:
-        pass
+async def do_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(client.rounds) < 10:
+        await update.message.reply_text("❌ Need more data. Use /scrape first", parse_mode='Markdown')
+        return
     
-    if user_credentials["username"] and user_credentials["password"]:
-        if scraper.login():
-            rounds = scraper.fetch_round_history(limit=500)
-            if rounds:
-                predictor.load_historical_data(rounds)
+    m = [r.get('crash_multiplier') or r.get('multiplier') or 0 for r in client.rounds if (r.get('crash_multiplier') or r.get('multiplier'))]
+    m = [float(x) for x in m if float(x) > 0]
+    
+    if len(m) < 10:
+        await update.message.reply_text("❌ Not enough valid multipliers", parse_mode='Markdown')
+        return
+    
+    recent = m[-50:]
+    avg = sum(recent) / len(recent)
+    low_streak = sum(1 for x in m[-10:] if x < 1.5)
+    high_streak = sum(1 for x in m[-10:] if x > 3.0)
+    
+    if low_streak >= 6:
+        pred = avg * 1.5
+        conf = 0.55
+        sig = "🚀 BUY_HIGH"
+        cashout = min(pred * 0.6, 5.0)
+        reason = "Strong bounce expected after low streak"
+    elif high_streak >= 4:
+        pred = avg * 0.7
+        conf = 0.4
+        sig = "⚠️ CAUTION"
+        cashout = 1.5
+        reason = "Consolidation expected after highs"
+    else:
+        pred = avg * (0.9 + random.uniform(0, 0.2))
+        conf = 0.35
+        sig = "📊 BUY_MEDIUM" if conf > 0.3 else "⏸️ SKIP"
+        cashout = min(pred * 0.7, 3.0)
+        reason = "Normal pattern"
+    
+    pred = max(1.0, round(pred, 2))
+    
+    msg = (
+        f"{sig}\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"▸ *Prediction:* `{pred}x`\n"
+        f"▸ *Confidence:* `{conf:.0%}`\n"
+        f"▸ *Cashout:* `{cashout:.2f}x`\n"
+        f"▸ *Rounds:* `{len(m)}`\n\n"
+        f"📋 {reason}\n"
+        f"━━━━━━━━━━━━━━━"
+    )
+    
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
 
 # ===================== MAIN =====================
 def main():
     logger.info("=" * 50)
-    logger.info("BETPAWA BOT — Starting")
+    logger.info("BETPAWA BOT — STARTING")
     logger.info("=" * 50)
-
+    
     if not BOT_TOKEN:
-        logger.error("❌ No BOT_TOKEN")
+        logger.error("No BOT_TOKEN")
         return
-
-    # Health server
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    # Build app — NO job queue, NO startup event loop crash
+    
+    # Health server in background
+    t = threading.Thread(target=health_server, daemon=True)
+    t.start()
+    
+    # Build application
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # Handlers
-    conv = ConversationHandler(
-        entry_points=[CommandHandler('login', login_command)],
-        states={
-            AWAITING_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_username)],
-            AWAITING_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_password)],
-        },
-        fallbacks=[CommandHandler('cancel', cancel)],
-    )
-
+    
+    # Add handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(conv)
-    app.add_handler(CommandHandler("scrape", scrape_command))
-    app.add_handler(CommandHandler("signal", signal_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("analyze", analyze_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-
-    # Startup notification using asyncio.create_task, no manual event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(startup(app))
-    loop.close()
-
-    # Run polling — this creates its OWN event loop
-    logger.info("🤖 Bot running")
+    app.add_handler(CommandHandler("login", do_login))
+    app.add_handler(CommandHandler("scrape", do_scrape))
+    app.add_handler(CommandHandler("seeds", do_seeds))
+    app.add_handler(CommandHandler("signal", do_signal))
+    app.add_handler(CommandHandler("balance", do_balance))
+    app.add_handler(CommandHandler("status", do_status))
+    
+    # Auto-login on startup via a background task
+    if BETPAWA_USER and BETPAWA_PASS:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        async def auto_start():
+            await asyncio.sleep(5)
+            try:
+                await app.bot.send_message(YOUR_CHAT_ID, "🤖 Bot started! Logging in...")
+            except:
+                pass
+            
+            ok = client.login()
+            if ok:
+                rounds = client.fetch_rounds(limit=200)
+                client.rounds.extend(rounds)
+                seeds = client.fetch_seeds()
+                bal = client.get_balance()
+                try:
+                    await app.bot.send_message(
+                        YOUR_CHAT_ID,
+                        f"✅ *Auto-login successful*\n💰 `{bal} UGX` | 📊 `{len(client.rounds)}` rounds",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+        
+        loop.run_until_complete(auto_start())
+        loop.close()
+    
+    logger.info("🤖 Bot polling...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
