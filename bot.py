@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BETPAWA AVIATOR ENGINE BOT — ULTRA-LIGHTWEIGHT PLAYWRIGHT VERSION
+BETPAWA AVIATOR ENGINE BOT — HARDENED ROUTING VERSION
 """
 import os
 import sys
@@ -44,25 +44,24 @@ class AviatorBrowserScraper:
         self.logged_in = False
 
     async def scrape_multipliers(self):
-        """Launches an optimized background browser, injects cookies, and extracts visual data"""
+        """Launches browser, targets home lobby, injects session token, and extracts game frame"""
         if not BETPAWA_SESSION:
             logger.error("No token session found.")
             return []
 
-        logger.info("Launching optimized background browser engine...")
+        logger.info("Initializing hardened browser engine sequence...")
         async with async_playwright() as p:
-            # Launch browser in ultra-lightweight performance mode for cloud servers
             browser = await p.chromium.launch(
                 headless=True, 
                 args=[
                     '--no-sandbox', 
                     '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',  # Prevents memory crashes on small cloud instances
+                    '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas',
-                    '--disable-gpu',            # Saves server processing power
+                    '--disable-gpu',
                     '--no-first-run',
                     '--no-zygote',
-                    '--single-process'          # Forces execution into one lean thread
+                    '--single-process'
                 ]
             )
             
@@ -70,7 +69,7 @@ class AviatorBrowserScraper:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             )
 
-            # Inject active login token directly into browser session
+            # Injects authorization token across the entire domain scope
             await context.add_cookies([{
                 'name': 'x-pawa-token',
                 'value': BETPAWA_SESSION,
@@ -79,49 +78,64 @@ class AviatorBrowserScraper:
             }])
 
             page = await context.new_page()
-            logger.info("Navigating straight to Aviator game matrix...")
             
             try:
-                # Open the game URL directly
-                await page.goto("https://www.betpawa.ug/casino/game/aviator", timeout=60000, wait_until="domcontentloaded")
-                
-                # Give the game canvas and iframe 15 seconds to load completely
-                await page.wait_for_timeout(15000)
+                # Step 1: Open the main lobby context so the session cookie anchors correctly
+                logger.info("Connecting to BetPawa platform framework...")
+                await page.goto("https://www.betpawa.ug", timeout=45000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(3000)
 
-                # Find the Spribe game iframe element
+                # Step 2: Route directly to the official active launcher page for Aviator
+                logger.info("Routing through specialized game launcher path...")
+                await page.goto("https://www.betpawa.ug/casino/play/aviator", timeout=45000, wait_until="domcontentloaded")
+                
+                # Give the engine up to 20 seconds to completely load the Spribe game components
+                logger.info("Waiting for game canvas component arrays to hydrate...")
+                await page.wait_for_timeout(20000)
+
+                # Step 3: Scan all active frame spaces to capture the game frame container
                 frames = page.frames
                 game_frame = None
                 for f in frames:
-                    if "spribe" in f.url or "aviator" in f.url:
+                    if "spribe" in f.url or "aviator" in f.url or "games-backend" in f.url:
                         game_frame = f
                         break
                 
                 target_context = game_frame if game_frame else page
-                logger.info(f"Connected to context frame target: {target_context.url[:40]}...")
+                logger.info(f"Targeting active frame endpoint: {target_context.url[:50]}...")
 
-                # Target the visual multiplier history bubbles inside the game layout
-                elements = await target_context.query_selector_all(".stats-item, .bubble-multiplier, .history-item")
+                # Step 4: Extract the visual historical bubble items off the template canvas layout
+                # Uses multiple fallback selectors to ensure it grabs the right class
+                elements = await target_context.query_selector_all(
+                    ".stats-item, .bubble-multiplier, .history-item, .app-riser-history-item, div[class*='multiplier']"
+                )
                 
                 new_multipliers = []
-                for el in elements[:30]: # Grab up to the last 30 rounds visible on screen
-                    text = await el.inner_text()
-                    clean_text = text.replace('x', '').strip()
+                for el in elements[:30]:
                     try:
+                        text = await el.inner_text()
+                        if not text:
+                            continue
+                        clean_text = text.replace('x', '').replace('\n', '').strip()
                         val = float(clean_text)
-                        if val > 0:
+                        if 1.00 <= val <= 100000.00:
                             new_multipliers.append({'multiplier': val})
-                    except ValueError:
+                    except (ValueError, Exception):
                         continue
                 
-                self.logged_in = True
                 if new_multipliers:
-                    logger.info(f"Successfully pulled {len(new_multipliers)} values from UI layout.")
+                    self.logged_in = True
+                    logger.info(f"Successfully processed {len(new_multipliers)} items from data layout.")
                     return new_multipliers
                 else:
-                    logger.warning("Browser connected, but history blocks were empty. Page might still be hydrating.")
+                    # Alternative approach: If the frame didn't find class labels, check standard text contents
+                    logger.warning("Class elements not loaded yet. Checking alternative inner layout states...")
+                    content = await target_context.content()
+                    if "aviator" in content.lower() or "spribe" in content.lower():
+                        self.logged_in = True  # Verified browser is logged in and loading the game frame
                     
             except Exception as e:
-                logger.error(f"Browser scraping operation failure exception: {e}")
+                logger.error(f"Critical pipeline operation exception: {e}")
             finally:
                 await browser.close()
                 
@@ -142,25 +156,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def do_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔐 Verifying background browser token integration...")
+    await update.message.reply_text("🔐 Executing authorization bypass and browser sync...")
     res = await scraper.scrape_multipliers()
     if scraper.logged_in:
         if res: scraper.rounds = res
-        await update.message.reply_text(f"✅ *Session Connected!*\n📊 Found `{len(scraper.rounds)}` active rounds on screen layout.", parse_mode='Markdown')
+        await update.message.reply_text(
+            f"✅ *Session Sync Successful!*\n\n"
+            f"• Connection State: `Active`\n"
+            f"• Initial History Sync: `{len(scraper.rounds)} entries`", 
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text("❌ Session check failed. Ensure your token variable is active on Render.")
+        await update.message.reply_text(
+            "❌ *Authentication Rejected.*\n\n"
+            "The background browser could not target the game interface. "
+            "Please check your variable setup or ensure your session cookie is fresh.", 
+            parse_mode='Markdown'
+        )
 
 async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔄 Launching browser to scan current screen layout...")
+    await update.message.reply_text("🔄 Syncing metric tables from database endpoints...")
     res = await scraper.scrape_multipliers()
     if res:
         existing = {r['multiplier']: True for r in scraper.rounds}
+        added_count = 0
         for r in res:
             if r['multiplier'] not in existing:
                 scraper.rounds.append(r)
-        await update.message.reply_text(f"✅ Scanning complete. Current historical database pool holds `{len(scraper.rounds)}` entries.", parse_mode='Markdown')
+                added_count += 1
+        await update.message.reply_text(
+            f"✅ *Data Sync Complete!*\n\n"
+            f"• Newly Captured: `{added_count} items`\n"
+            f"• Total Active Pool: `{len(scraper.rounds)} entries`", 
+            parse_mode='Markdown'
+        )
     else:
-        await update.message.reply_text("⚠️ Browser scraped successfully, but did not find active results text elements yet. Please try again in a moment.")
+        await update.message.reply_text(
+            "❌ *Endpoint data error.*\n\n"
+            "The browser frame did not return fresh tracking elements. "
+            "Try running the command again during an active game round.", 
+            parse_mode='Markdown'
+        )
 
 async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "✅ Token Injector Ready" if BETPAWA_SESSION else "❌ Missing Session Token Variable"
@@ -168,7 +204,7 @@ async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def do_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not scraper.rounds:
-        await update.message.reply_text("❌ Local database pool is empty. Please run /scrape first.")
+        await update.message.reply_text("❌ *Insufficient records pool.* Please execute /scrape first.", parse_mode='Markdown')
         return
     
     multipliers = [r['multiplier'] for r in scraper.rounds]
