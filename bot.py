@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BETPAWA AVIATOR ENGINE BOT — PLAYWRIGHT BROWSER VERSION
+BETPAWA AVIATOR ENGINE BOT — ULTRA-LIGHTWEIGHT PLAYWRIGHT VERSION
 """
 import os
 import sys
@@ -44,22 +44,33 @@ class AviatorBrowserScraper:
         self.logged_in = False
 
     async def scrape_multipliers(self):
-        """Launches a headless browser, injects the cookie, and grabs the multipliers from the UI"""
+        """Launches an optimized background browser, injects cookies, and extracts visual data"""
         if not BETPAWA_SESSION:
             logger.error("No token session found.")
             return []
 
-        logger.info("Launching background browser engine...")
+        logger.info("Launching optimized background browser engine...")
         async with async_playwright() as p:
-            # Launch browser in headless mode (invisible background process)
-            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            # Launch browser in ultra-lightweight performance mode for cloud servers
+            browser = await p.chromium.launch(
+                headless=True, 
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',  # Prevents memory crashes on small cloud instances
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu',            # Saves server processing power
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--single-process'          # Forces execution into one lean thread
+                ]
+            )
             
-            # Create a clean browser context
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             )
 
-            # Inject your active login token directly into the browser session cookies
+            # Inject active login token directly into browser session
             await context.add_cookies([{
                 'name': 'x-pawa-token',
                 'value': BETPAWA_SESSION,
@@ -74,7 +85,7 @@ class AviatorBrowserScraper:
                 # Open the game URL directly
                 await page.goto("https://www.betpawa.ug/casino/game/aviator", timeout=60000, wait_until="domcontentloaded")
                 
-                # Give the dynamic Spribe game canvas and iframe 15 seconds to load up assets
+                # Give the game canvas and iframe 15 seconds to load completely
                 await page.wait_for_timeout(15000)
 
                 # Find the Spribe game iframe element
@@ -89,11 +100,10 @@ class AviatorBrowserScraper:
                 logger.info(f"Connected to context frame target: {target_context.url[:40]}...")
 
                 # Target the visual multiplier history bubbles inside the game layout
-                # Spribe wraps historical rounds in class labels like 'bubble-multiplier' or item blocks
                 elements = await target_context.query_selector_all(".stats-item, .bubble-multiplier, .history-item")
                 
                 new_multipliers = []
-                for el in elements[:30]: # Grab the last 30 rounds visible on screen
+                for el in elements[:30]: # Grab up to the last 30 rounds visible on screen
                     text = await el.inner_text()
                     clean_text = text.replace('x', '').strip()
                     try:
@@ -138,7 +148,7 @@ async def do_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if res: scraper.rounds = res
         await update.message.reply_text(f"✅ *Session Connected!*\n📊 Found `{len(scraper.rounds)}` active rounds on screen layout.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Session check failed. Ensure token variable is set up properly on Render.")
+        await update.message.reply_text("❌ Session check failed. Ensure your token variable is active on Render.")
 
 async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔄 Launching browser to scan current screen layout...")
@@ -150,7 +160,7 @@ async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 scraper.rounds.append(r)
         await update.message.reply_text(f"✅ Scanning complete. Current historical database pool holds `{len(scraper.rounds)}` entries.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("⚠️ Browser scraped successfully, but did not find active results text elements. Try again in a minute.")
+        await update.message.reply_text("⚠️ Browser scraped successfully, but did not find active results text elements yet. Please try again in a moment.")
 
 async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "✅ Token Injector Ready" if BETPAWA_SESSION else "❌ Missing Session Token Variable"
@@ -168,7 +178,7 @@ async def do_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"📊 *DASHBOARD ANALYSIS*\n"
         f"━━━━━━━━━━━━━━━\n\n"
-        f"▸ *Target Multplier Estimate:* `{pred}x`\n"
+        f"▸ *Target Multiplier Estimate:* `{pred}x`\n"
         f"▸ *Database Size:* `{len(multipliers)}` entries\n\n"
         f"📋 *Notice:* Scanning live visual DOM frame states."
         f"\n━━━━━━━━━━━━━━━"
