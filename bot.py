@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BETPAWA AVIATOR ENGINE BOT — HARDENED ROUTING VERSION
+BETPAWA AVIATOR ENGINE BOT — FAILSAFE TIMEOUT VERSION
 """
 import os
 import sys
@@ -43,13 +43,8 @@ class AviatorBrowserScraper:
         self.rounds = []
         self.logged_in = False
 
-    async def scrape_multipliers(self):
-        """Launches browser, targets home lobby, injects session token, and extracts game frame"""
-        if not BETPAWA_SESSION:
-            logger.error("No token session found.")
-            return []
-
-        logger.info("Initializing hardened browser engine sequence...")
+    async def _execute_scrape(self):
+        """Internal execution path for running Playwright safely"""
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True, 
@@ -69,7 +64,6 @@ class AviatorBrowserScraper:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
             )
 
-            # Injects authorization token across the entire domain scope
             await context.add_cookies([{
                 'name': 'x-pawa-token',
                 'value': BETPAWA_SESSION,
@@ -80,20 +74,16 @@ class AviatorBrowserScraper:
             page = await context.new_page()
             
             try:
-                # Step 1: Open the main lobby context so the session cookie anchors correctly
-                logger.info("Connecting to BetPawa platform framework...")
-                await page.goto("https://www.betpawa.ug", timeout=45000, wait_until="domcontentloaded")
-                await page.wait_for_timeout(3000)
+                logger.info("Connecting to platform landing lobby...")
+                await page.goto("https://www.betpawa.ug", timeout=20000, wait_until="domcontentloaded")
+                await page.wait_for_timeout(2000)
 
-                # Step 2: Route directly to the official active launcher page for Aviator
-                logger.info("Routing through specialized game launcher path...")
-                await page.goto("https://www.betpawa.ug/casino/play/aviator", timeout=45000, wait_until="domcontentloaded")
+                logger.info("Routing through launcher interface...")
+                await page.goto("https://www.betpawa.ug/casino/play/aviator", timeout=20000, wait_until="domcontentloaded")
                 
-                # Give the engine up to 20 seconds to completely load the Spribe game components
-                logger.info("Waiting for game canvas component arrays to hydrate...")
-                await page.wait_for_timeout(20000)
+                # A shorter 8-second structural hydration delay
+                await page.wait_for_timeout(8000)
 
-                # Step 3: Scan all active frame spaces to capture the game frame container
                 frames = page.frames
                 game_frame = None
                 for f in frames:
@@ -102,10 +92,8 @@ class AviatorBrowserScraper:
                         break
                 
                 target_context = game_frame if game_frame else page
-                logger.info(f"Targeting active frame endpoint: {target_context.url[:50]}...")
+                logger.info(f"Targeting matrix context: {target_context.url[:40]}...")
 
-                # Step 4: Extract the visual historical bubble items off the template canvas layout
-                # Uses multiple fallback selectors to ensure it grabs the right class
                 elements = await target_context.query_selector_all(
                     ".stats-item, .bubble-multiplier, .history-item, .app-riser-history-item, div[class*='multiplier']"
                 )
@@ -114,8 +102,7 @@ class AviatorBrowserScraper:
                 for el in elements[:30]:
                     try:
                         text = await el.inner_text()
-                        if not text:
-                            continue
+                        if not text: continue
                         clean_text = text.replace('x', '').replace('\n', '').strip()
                         val = float(clean_text)
                         if 1.00 <= val <= 100000.00:
@@ -125,21 +112,30 @@ class AviatorBrowserScraper:
                 
                 if new_multipliers:
                     self.logged_in = True
-                    logger.info(f"Successfully processed {len(new_multipliers)} items from data layout.")
                     return new_multipliers
-                else:
-                    # Alternative approach: If the frame didn't find class labels, check standard text contents
-                    logger.warning("Class elements not loaded yet. Checking alternative inner layout states...")
-                    content = await target_context.content()
-                    if "aviator" in content.lower() or "spribe" in content.lower():
-                        self.logged_in = True  # Verified browser is logged in and loading the game frame
+                
+                # Fallback login state confirmation if classes are generic
+                content = await target_context.content()
+                if "aviator" in content.lower() or "spribe" in content.lower():
+                    self.logged_in = True
                     
             except Exception as e:
-                logger.error(f"Critical pipeline operation exception: {e}")
+                logger.error(f"Internal browser error sequence: {e}")
             finally:
                 await browser.close()
                 
         return []
+
+    async def scrape_multipliers(self):
+        """Wraps the scraper execution path in a tight 35-second anti-hang safety timeout"""
+        try:
+            return await asyncio.wait_for(self._execute_scrape(), timeout=35.0)
+        except asyncio.TimeoutError:
+            logger.error("Scraping task timed out due to defensive cloud challenges.")
+            return []
+        except Exception as e:
+            logger.error(f"Wrapper exception caught: {e}")
+            return []
 
 # ===================== TELEGRAM BOT ACTIONS =====================
 scraper = AviatorBrowserScraper()
@@ -168,9 +164,9 @@ async def do_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "❌ *Authentication Rejected.*\n\n"
-            "The background browser could not target the game interface. "
-            "Please check your variable setup or ensure your session cookie is fresh.", 
+            "⚠️ *Sync Delayed or Timed Out*\n\n"
+            "The platform's cloud firewall or loading latency blocked the response. "
+            "Verify your `BETPAWA_SESSION` token is fresh, or try running /scrape again.", 
             parse_mode='Markdown'
         )
 
@@ -192,9 +188,9 @@ async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         await update.message.reply_text(
-            "❌ *Endpoint data error.*\n\n"
-            "The browser frame did not return fresh tracking elements. "
-            "Try running the command again during an active game round.", 
+            "❌ *Data Sync Timeout / Empty Frame*\n\n"
+            "The browser engine timed out or was hidden behind a landing challenge. "
+            "Please check your web dashboard panel or retry the command in a moment.", 
             parse_mode='Markdown'
         )
 
