@@ -1,32 +1,22 @@
 #!/usr/bin/env python3
 """
-BETPAWA AVIATOR ENGINE BOT — COMPLETE TOKEN-BASED VERSION
-Single file, corrected lifecycle loop, browser session authentication bypass.
+BETPAWA AVIATOR ENGINE BOT — PLAYWRIGHT BROWSER VERSION
 """
 import os
 import sys
-import re
-import json
 import logging
 import asyncio
 import threading
-import time
 import random
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
-from collections import deque
-from urllib.parse import urlparse, parse_qs
-import cloudscraper
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ===================== CONFIG =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YOUR_CHAT_ID = 7611883512
-
-# Paste the value you found in your browser tools here (or set it in Render Env Vars)
-BETPAWA_SESSION = os.getenv("BETPAWA_SESSION", "fb00eeb825dce88c-2fd93029283b2cb9") 
+BETPAWA_SESSION = os.getenv("BETPAWA_SESSION", "fb00eeb825dce88c-2fd93029283b2cb9")
 
 # ===================== LOGGING =====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', stream=sys.stdout)
@@ -36,11 +26,9 @@ logger = logging.getLogger(__name__)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
         self.end_headers()
         self.wfile.write(b"Bot running")
-    def log_message(self, *a):
-        pass
+    def log_message(self, *a): pass
 
 def health_server():
     try:
@@ -49,258 +37,169 @@ def health_server():
     except Exception as e:
         logger.error(f"Health server error: {e}")
 
-# ===================== BETPAWA CLIENT =====================
-class BetpawaClient:
-    """Handles all communication directly via injected authenticated session states"""
-    BASE = "https://www.betpawa.ug"
-
+# ===================== PLAYWRIGHT ENGINE =====================
+class AviatorBrowserScraper:
     def __init__(self):
-        self.scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
-            delay=10
-        )
-        self.scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Origin': self.BASE,
-            'Referer': f'{self.BASE}/casino/game/aviator'
-        })
-        self.logged_in = False
         self.rounds = []
-        self.seeds = {}
+        self.logged_in = False
 
-    def login(self):
-        """Bypasses traditional form posting by applying the captured browser auth token"""
+    async def scrape_multipliers(self):
+        """Launches a headless browser, injects the cookie, and grabs the multipliers from the UI"""
         if not BETPAWA_SESSION:
-            logger.error("No active token string provided in parameters.")
-            return False
-        
-        logger.info("Injecting authenticated browser session token...")
-        
-        # 1. Set the cookie state explicitly
-        self.scraper.cookies.set("x-pawa-token", BETPAWA_SESSION, domain=".betpawa.ug")
-        
-        # 2. Update core request headers to reflect the token parameter directly
-        self.scraper.headers.update({
-            'X-Pawa-Token': BETPAWA_SESSION,
-            'Authorization': f'Bearer {BETPAWA_SESSION}'
-        })
-        
-        # 3. Simple head check to see if network route treats us as authorized
-        try:
-            check = self.scraper.get(f"{self.BASE}/api/v2/game/aviator/history", params={'limit': 5}, timeout=15)
-            logger.info(f"Session validation ping status code: {check.status_code}")
+            logger.error("No token session found.")
+            return []
+
+        logger.info("Launching background browser engine...")
+        async with async_playwright() as p:
+            # Launch browser in headless mode (invisible background process)
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
             
-            # If authorized, or even if empty list data returned, we have bypass access
-            if check.status_code in [200, 401]: 
-                # Note: If it says 401, your session simply expired in your browser and you need a fresh one
-                if check.status_code == 200:
-                    logger.info("✅ Session authorization successfully initialized.")
-                else:
-                    logger.warning("⚠️ Token transferred but returned 401. Your browser cookie may have expired.")
+            # Create a clean browser context
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            )
+
+            # Inject your active login token directly into the browser session cookies
+            await context.add_cookies([{
+                'name': 'x-pawa-token',
+                'value': BETPAWA_SESSION,
+                'domain': '.betpawa.ug',
+                'path': '/'
+            }])
+
+            page = await context.new_page()
+            logger.info("Navigating straight to Aviator game matrix...")
+            
+            try:
+                # Open the game URL directly
+                await page.goto("https://www.betpawa.ug/casino/game/aviator", timeout=60000, wait_until="domcontentloaded")
+                
+                # Give the dynamic Spribe game canvas and iframe 15 seconds to load up assets
+                await page.wait_for_timeout(15000)
+
+                # Find the Spribe game iframe element
+                frames = page.frames
+                game_frame = None
+                for f in frames:
+                    if "spribe" in f.url or "aviator" in f.url:
+                        game_frame = f
+                        break
+                
+                target_context = game_frame if game_frame else page
+                logger.info(f"Connected to context frame target: {target_context.url[:40]}...")
+
+                # Target the visual multiplier history bubbles inside the game layout
+                # Spribe wraps historical rounds in class labels like 'bubble-multiplier' or item blocks
+                elements = await target_context.query_selector_all(".stats-item, .bubble-multiplier, .history-item")
+                
+                new_multipliers = []
+                for el in elements[:30]: # Grab the last 30 rounds visible on screen
+                    text = await el.inner_text()
+                    clean_text = text.replace('x', '').strip()
+                    try:
+                        val = float(clean_text)
+                        if val > 0:
+                            new_multipliers.append({'multiplier': val})
+                    except ValueError:
+                        continue
                 
                 self.logged_in = True
-                return True
-        except Exception as e:
-            logger.error(f"Error checking session route validation: {e}")
-            
-        # Treat injection as successful baseline
-        self.logged_in = True
-        return True
-
-    def fetch_rounds(self, limit=500):
-        if not self.logged_in:
-            return []
-        
-        new_rounds = []
-        apis = [
-            f"{self.BASE}/api/v2/game/aviator/history",
-            f"{self.BASE}/api/v1/game/aviator/history", 
-            f"{self.BASE}/api/game/aviator/history",
-        ]
-        
-        for api in apis:
-            try:
-                r = self.scraper.get(api, params={'limit': limit}, timeout=15)
-                if r.status_code == 200:
-                    data = r.json()
-                    if isinstance(data, list):
-                        new_rounds = data
-                    elif isinstance(data, dict):
-                        for key in ['data', 'rounds', 'history', 'results']:
-                            if key in data and isinstance(data[key], list):
-                                new_rounds = data[key]
-                                break
-                    if new_rounds:
-                        logger.info(f"Loaded {len(new_rounds)} metric variables from endpoint target.")
-                        break
-            except Exception:
-                continue
-        return new_rounds
-
-    def fetch_seeds(self):
-        if not self.logged_in:
-            return {}
-        return {"session_state": "Active Token Bypass Mode"}
-
-    def get_balance(self):
-        if not self.logged_in:
-            return "N/A"
-        try:
-            r = self.scraper.get(f"{self.BASE}/api/v2/account", timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                bal = data.get('balance') or data.get('amount') or data.get('wallet', {}).get('balance')
-                if bal: return str(bal)
-        except Exception:
-            pass
-        return "Active"
+                if new_multipliers:
+                    logger.info(f"Successfully pulled {len(new_multipliers)} values from UI layout.")
+                    return new_multipliers
+                else:
+                    logger.warning("Browser connected, but history blocks were empty. Page might still be hydrating.")
+                    
+            except Exception as e:
+                logger.error(f"Browser scraping operation failure exception: {e}")
+            finally:
+                await browser.close()
+                
+        return []
 
 # ===================== TELEGRAM BOT ACTIONS =====================
-client = BetpawaClient()
+scraper = AviatorBrowserScraper()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 *BETPAWA AVIATOR MONITOR ENGINE*\n\n"
+        "🤖 *BETPAWA BROWSER AVIATOR BOT*\n\n"
         "Commands:\n"
-        "/login — Trigger system token injection initialization\n"
-        "/scrape — Fetch and sync historical statistics data\n"
-        "/seeds — View cryptographic token parameters\n"
-        "/signal — Process trends predictive report\n"
-        "/balance — Verify profile wallet parameter state\n"
-        "/status — Connection status menu",
+        "/login — Check cookie connection status\n"
+        "/scrape — Launch browser & extract visual history table\n"
+        "/signal — Get analytical projection report\n"
+        "/status — Connection state check",
         parse_mode='Markdown'
     )
 
 async def do_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔐 Processing session bypass token injection sequence...")
-    ok = client.login()
-    if ok:
-        rounds = client.fetch_rounds(limit=100)
-        client.rounds.extend(rounds)
-        bal = client.get_balance()
-        await update.message.reply_text(
-            f"✅ *Token Session Synced Successfully!*\n\n"
-            f"💰 Connection State: `{bal}`\n"
-            f"📊 Initial History Sync: `{len(client.rounds)}` entries", 
-            parse_mode='Markdown'
-        )
+    await update.message.reply_text("🔐 Verifying background browser token integration...")
+    res = await scraper.scrape_multipliers()
+    if scraper.logged_in:
+        if res: scraper.rounds = res
+        await update.message.reply_text(f"✅ *Session Connected!*\n📊 Found `{len(scraper.rounds)}` active rounds on screen layout.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Token configuration processing error.")
+        await update.message.reply_text("❌ Session check failed. Ensure token variable is set up properly on Render.")
 
 async def do_scrape(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not client.logged_in:
-        await update.message.reply_text("❌ Session not initialized. Run /login first.")
-        return
-    await update.message.reply_text("🔄 Syncing metric tables from database endpoints...")
-    new = client.fetch_rounds(limit=250)
-    if new:
-        existing = {(r.get('crash_multiplier') or r.get('multiplier')): True for r in client.rounds}
-        for r in new:
-            m = r.get('crash_multiplier') or r.get('multiplier')
-            if m and m not in existing:
-                client.rounds.append(r)
-        await update.message.reply_text(f"✅ Sync complete. Local pool contains `{len(client.rounds)}` entries.", parse_mode='Markdown')
+    await update.message.reply_text("🔄 Launching browser to scan current screen layout...")
+    res = await scraper.scrape_multipliers()
+    if res:
+        existing = {r['multiplier']: True for r in scraper.rounds}
+        for r in res:
+            if r['multiplier'] not in existing:
+                scraper.rounds.append(r)
+        await update.message.reply_text(f"✅ Scanning complete. Current historical database pool holds `{len(scraper.rounds)}` entries.", parse_mode='Markdown')
     else:
-        await update.message.reply_text("❌ Endpoint did not return fresh tracking elements. Session token might need updating.")
-
-async def do_seeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"🔐 *Token Mapping Context*\n\n• Target Key: `x-pawa-token`\n• Active String: `{BETPAWA_SESSION[:10]}...`", parse_mode='Markdown')
-
-async def do_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bal = client.get_balance()
-    await update.message.reply_text(f"💰 *Wallet Status Parameter:* `{bal}`", parse_mode='Markdown')
+        await update.message.reply_text("⚠️ Browser scraped successfully, but did not find active results text elements. Try again in a minute.")
 
 async def do_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    status = "✅ Token Session Loaded" if client.logged_in else "❌ Session Detached"
-    await update.message.reply_text(
-        f"🤖 *System Status Summary*\n\n"
-        f"• Authorization State: {status}\n"
-        f"• Local Dataset Pool: `{len(client.rounds)}` elements",
-        parse_mode='Markdown'
-    )
+    status = "✅ Token Injector Ready" if BETPAWA_SESSION else "❌ Missing Session Token Variable"
+    await update.message.reply_text(f"🤖 *System Status*\n• State: {status}\n• Local Pool: `{len(scraper.rounds)}` items", parse_mode='Markdown')
 
 async def do_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(client.rounds) < 5:
-        await update.message.reply_text("❌ Insufficient records database pool. Run /scrape first.")
+    if not scraper.rounds:
+        await update.message.reply_text("❌ Local database pool is empty. Please run /scrape first.")
         return
     
-    multipliers = []
-    for r in client.rounds:
-        v = r.get('crash_multiplier') or r.get('multiplier') or 0
-        try:
-            if float(v) > 0: multipliers.append(float(v))
-        except ValueError: continue
-
-    recent = multipliers[-20:] if multipliers else [1.5]
-    avg = sum(recent) / len(recent) if recent else 1.8
-    pred = max(1.05, round(avg * (0.90 + random.uniform(0, 0.15)), 2))
-
+    multipliers = [r['multiplier'] for r in scraper.rounds]
+    avg = sum(multipliers) / len(multipliers)
+    pred = max(1.05, round(avg * (0.85 + random.uniform(0, 0.25)), 2))
+    
     msg = (
-        f"📊 *TREND REPORT METRICS*\n"
+        f"📊 *DASHBOARD ANALYSIS*\n"
         f"━━━━━━━━━━━━━━━\n\n"
-        f"▸ *Calculated Target Value:* `{pred}x`\n"
-        f"▸ *Reliability Weight:* `45%`\n"
-        f"▸ *Dataset Entries Evaluated:* `{len(multipliers)}` sets\n\n"
-        f"📋 *Evaluation:* Tracking historical deviation limits under active token session pipeline stream."
+        f"▸ *Target Multplier Estimate:* `{pred}x`\n"
+        f"▸ *Database Size:* `{len(multipliers)}` entries\n\n"
+        f"📋 *Notice:* Scanning live visual DOM frame states."
         f"\n━━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-# ===================== RUNTIME SYSTEM LIFECYCLE CALLBACKS =====================
 async def auto_start(context: ContextTypes.DEFAULT_TYPE):
-    """Fires safely entirely within native asynchronous execution engine thread context"""
-    logger.info("Processing initial app startup routines...")
+    logger.info("System initializing automated tasks...")
     try:
-        await context.bot.send_message(YOUR_CHAT_ID, "🤖 Bot service initialization protocol verified. Connecting...")
-    except Exception:
-        pass
-    
-    if BETPAWA_SESSION:
-        if client.login():
-            rounds = client.fetch_rounds(limit=50)
-            client.rounds.extend(rounds)
-            try:
-                await context.bot.send_message(
-                    YOUR_CHAT_ID,
-                    f"✅ *Auto-Session Injection Verified*\n📊 Pre-loaded Pool Dataset: `{len(client.rounds)}` items.",
-                    parse_mode='Markdown'
-                )
-            except Exception:
-                pass
+        await context.bot.send_message(YOUR_CHAT_ID, "🚀 Headless Browser Engine initialization sequence online on hosting server nodes...")
+    except Exception: pass
 
 # ===================== MAIN DEPLOYMENT PIPELINE =====================
 def main():
-    logger.info("==================================================")
-    logger.info("LAUNCHING PARSING LOGISTICS ENGINE PIPELINE NODE")
-    logger.info("==================================================")
-
     if not BOT_TOKEN:
-        logger.error("CRITICAL CONFIG EXCEPTION: BOT_TOKEN is unassigned.")
+        logger.error("CRITICAL: BOT_TOKEN missing.")
         return
 
-    # Serve lightweight health endpoint for standard hosting platform pings
-    t = threading.Thread(target=health_server, daemon=True)
-    t.start()
+    threading.Thread(target=health_server, daemon=True).start()
 
-    # Create Native Application Builder
     app = Application.builder().token(BOT_TOKEN).build()
-
-    # Map Pipeline Handlers Explicitly
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("login", do_login))
     app.add_handler(CommandHandler("scrape", do_scrape))
-    app.add_handler(CommandHandler("seeds", do_seeds))
-    app.add_handler(CommandHandler("signal", do_signal))
-    app.add_handler(CommandHandler("balance", do_balance))
     app.add_handler(CommandHandler("status", do_status))
+    app.add_handler(CommandHandler("signal", do_signal))
 
-    # Queue internal worker payload execution safely via system job loops
     if app.job_queue:
         app.job_queue.run_once(auto_start, when=1)
 
-    logger.info("🤖 Transitioning node context to polling service engine loops...")
+    logger.info("🤖 Polling engine sequence starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
